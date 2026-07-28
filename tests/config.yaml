@@ -1,0 +1,38 @@
+reference:
+  sample_id: mini_reference
+  fasta: "tests/data/reference.fa"
+  gff: "tests/data/reference.gff3"
+
+samples: "tests/samples.tsv"
+results_dir: "tests/results"
+logs_dir: "tests/logs"
+work_dir: "tests/work"
+
+liftoff:
+  reference_fasta: "tests/data/reference.fa"
+  reference_db: "tests/data/reference.gff3_db"
+  feature_types: "config/liftoff_features.txt"
+  pixi_environment: "liftoff"
+  threads: 4
+
+tag:
+  diamond_threads: 2
+  blastp_identity: 20
+  blastp_query_coverage: 20
+  blastx_identity: 20
+  blastx_query_coverage: 20
+  pseudogene_flank_bp: 50000
+  flank_gene_count: 10
+
+merge:
+  member_overlap_threshold: 0.1
+
+resources:
+  liftoff_mem_mb: 16000
+  liftoff_runtime_min: 120
+  single_sample_mem_mb: 8000
+  single_sample_runtime_min: 60
+  pseudogene_mem_mb: 8000
+  pseudogene_runtime_min: 60
+  merge_mem_mb: 8000
+  merge_runtime_min: 60

@@ -11,13 +11,6 @@ logs/*
 work/*
 !work/.gitkeep
 
-tests/data/reference/*
-!tests/data/reference/.gitkeep
-tests/data/liftoff_reference/*
-!tests/data/liftoff_reference/.gitkeep
-tests/data/assemblies/*
-!tests/data/assemblies/.gitkeep
-
 comparison/
 .snakemake/
 *.log
