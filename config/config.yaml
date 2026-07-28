@@ -1,0 +1,38 @@
+reference:
+  sample_id: chm13
+  fasta: "/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/chm13.fa"
+  gff: "/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/gff/chm13.gff"
+
+samples: "config/samples.tsv"
+results_dir: "results"
+logs_dir: "logs"
+work_dir: "work"
+
+liftoff:
+  reference_fasta: "/share/home/zhanglab/user/chenquanyu/rawdata/GRCh38/ref/GRCh38.p14.genome.fa"
+  reference_db: "/share/home/zhanglab/user/chenquanyu/rawdata/GRCh38/ref/gencode.v47.chr_patch_hapl_scaff.annotation.gff3_db"
+  feature_types: "config/liftoff_features.txt"
+  pixi_environment: "liftoff"
+  threads: 8
+
+tag:
+  diamond_threads: 4
+  blastp_identity: 20
+  blastp_query_coverage: 20
+  blastx_identity: 20
+  blastx_query_coverage: 20
+  pseudogene_flank_bp: 50000
+  flank_gene_count: 10
+
+merge:
+  member_overlap_threshold: 0.1
+
+resources:
+  liftoff_mem_mb: 48000
+  liftoff_runtime_min: 1440
+  single_sample_mem_mb: 16000
+  single_sample_runtime_min: 240
+  pseudogene_mem_mb: 16000
+  pseudogene_runtime_min: 240
+  merge_mem_mb: 32000
+  merge_runtime_min: 480

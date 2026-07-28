@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pan-tag"
+version = "0.1.0"
+description = "Identify and reconcile tandemly arrayed gene clusters in pangenomes."
+requires-python = ">=3.10"
+dependencies = [
+  "biopython>=1.85",
+  "pyyaml>=6",
+]
+
+[project.scripts]
+pantag-prepare = "pantag.prepare:main"
+pantag-single-sample-tag = "pantag.single_sample_tag:main"
+pantag-retrieve-pseudogenes = "pantag.retrieve_pseudogenes:main"
+pantag-merge = "pantag.merge:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

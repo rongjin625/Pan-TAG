@@ -1,0 +1,306 @@
+"""Pan-TAG v0.1.
+
+Run inside the Pixi environment:
+pixi run snakemake --snakefile workflow/Snakefile \
+  --configfile config/config.yaml --cores 8
+"""
+
+import csv
+import os
+import re
+
+
+SAMPLES_FILE = config.get("samples", "config/samples.tsv")
+RESULTS = config.get("results_dir", "results")
+LOGS = config.get("logs_dir", "logs")
+WORK = config.get("work_dir", "work")
+PIXI_BIN = os.environ.get("PIXI_BIN", "pixi")
+PIXI_MANIFEST = os.path.abspath("pixi.toml")
+
+
+def load_samples(path):
+    with open(path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    required = {"sample_id", "fasta"}
+    if not rows or not required.issubset(rows[0]):
+        raise ValueError(f"{path} must contain: {sorted(required)}")
+    samples = {row["sample_id"]: row for row in rows}
+    if len(samples) != len(rows):
+        raise ValueError("sample_id values must be unique")
+    return samples
+
+
+TARGETS = load_samples(SAMPLES_FILE)
+REFERENCE = config["reference"]["sample_id"]
+if REFERENCE in TARGETS:
+    raise ValueError("Reference sample must not be repeated in samples.tsv")
+
+ALL_SAMPLES = [REFERENCE] + sorted(TARGETS)
+TARGET_PATTERN = "|".join(re.escape(sample) for sample in TARGETS)
+MCScanX_BIN = f"{WORK}/software/MCScanX_pantag"
+MCScanX_BUILD_INFO = f"{WORK}/software/MCScanX_pantag.build_info.txt"
+
+
+def sample_fasta(wildcards):
+    if wildcards.sample == REFERENCE:
+        return config["reference"]["fasta"]
+    return TARGETS[wildcards.sample]["fasta"]
+
+
+def sample_gff(wildcards):
+    if wildcards.sample == REFERENCE:
+        return config["reference"]["gff"]
+    return f"{RESULTS}/liftoff/{wildcards.sample}/{wildcards.sample}.liftoff.gff3"
+
+
+rule all:
+    input:
+        f"{RESULTS}/global/pangenome_TAGs.tsv",
+        f"{RESULTS}/global/pangenome_TAG_members.tsv",
+        f"{RESULTS}/global/local_to_global.tsv",
+        f"{RESULTS}/global/reconciliation_evidence.tsv",
+        f"{RESULTS}/global/fusion_events.tsv",
+
+
+rule validate_inputs:
+    input:
+        config=lambda wc: workflow.configfiles[0],
+        samples=SAMPLES_FILE,
+        reference_fasta=config["reference"]["fasta"],
+        reference_gff=config["reference"]["gff"],
+        target_fastas=[TARGETS[sample]["fasta"] for sample in sorted(TARGETS)],
+    output:
+        f"{RESULTS}/input_validation.json",
+    log:
+        f"{LOGS}/validate_inputs.log",
+    shell:
+        """
+        mkdir -p $(dirname {output}) $(dirname {log})
+        python -m pantag.prepare validate-inputs \
+          --config {input.config} \
+          --samples {input.samples} \
+          --output {output} \
+          > {log} 2>&1
+        """
+
+
+rule build_mcscanx_pantag:
+    input:
+        validated=f"{RESULTS}/input_validation.json",
+        script="src/pantag/mcscanx/build.sh",
+        source="src/pantag/mcscanx/MCScanX-source.tar.gz",
+    output:
+        binary=MCScanX_BIN,
+        build_info=MCScanX_BUILD_INFO,
+    log:
+        f"{LOGS}/build_mcscanx.log",
+    shell:
+        """
+        mkdir -p $(dirname {log})
+        bash {input.script} > {log} 2>&1
+        test -x {output.binary}
+        test -s {output.build_info}
+        """
+
+
+rule liftoff:
+    input:
+        validated=f"{RESULTS}/input_validation.json",
+        target_fasta=lambda wc: TARGETS[wc.sample]["fasta"],
+        reference_fasta=config["liftoff"]["reference_fasta"],
+        reference_db=config["liftoff"]["reference_db"],
+        feature_types=config["liftoff"]["feature_types"],
+    output:
+        gff=f"{RESULTS}/liftoff/{{sample}}/{{sample}}.liftoff.gff3",
+    params:
+        intermediate=f"{WORK}/liftoff/{{sample}}/intermediate_files_{{sample}}",
+        pixi_environment=config.get("liftoff", {}).get(
+            "pixi_environment", "liftoff"
+        ),
+    threads:
+        config.get("liftoff", {}).get("threads", 8)
+    resources:
+        mem_mb=config.get("resources", {}).get("liftoff_mem_mb", 48000),
+        runtime=config.get("resources", {}).get("liftoff_runtime_min", 1440),
+    log:
+        f"{LOGS}/liftoff/{{sample}}.log",
+    wildcard_constraints:
+        sample=TARGET_PATTERN,
+    shell:
+        """
+        mkdir -p $(dirname {output.gff}) {params.intermediate} $(dirname {log})
+        {PIXI_BIN} run \
+          --manifest-path {PIXI_MANIFEST} \
+          --environment {params.pixi_environment} \
+          liftoff {input.target_fasta} {input.reference_fasta} \
+          -db {input.reference_db} \
+          -o {output.gff} \
+          -dir {params.intermediate} \
+          -exclude_partial \
+          -p {threads} \
+          -f {input.feature_types} \
+          -copies \
+          -sc 0.95 \
+          > {log} 2>&1
+        """
+
+
+rule gffread_proteins:
+    input:
+        fasta=sample_fasta,
+        gff=sample_gff,
+    output:
+        f"{WORK}/{{sample}}/{{sample}}_raw_protein.faa",
+    log:
+        f"{LOGS}/gffread/{{sample}}.log",
+    shell:
+        """
+        mkdir -p $(dirname {output}) $(dirname {log})
+        gffread {input.gff} -g {input.fasta} -y {output} > {log} 2>&1
+        """
+
+
+rule prepare_tag_inputs:
+    input:
+        gff=sample_gff,
+        raw_proteins=f"{WORK}/{{sample}}/{{sample}}_raw_protein.faa",
+    output:
+        mcscanx_gff=f"{WORK}/{{sample}}/{{sample}}.gff",
+        gene_map=f"{WORK}/{{sample}}/{{sample}}.map",
+        proteins=f"{WORK}/{{sample}}/{{sample}}_renamed_protein.faa",
+        qc=f"{WORK}/{{sample}}/{{sample}}_prepare_qc.tsv",
+    log:
+        f"{LOGS}/prepare/{{sample}}.log",
+    shell:
+        """
+        mkdir -p $(dirname {log})
+        python -m pantag.prepare tag-inputs \
+          --sample-id {wildcards.sample} \
+          --annotation-gff {input.gff} \
+          --raw-proteins {input.raw_proteins} \
+          --output-mcscanx-gff {output.mcscanx_gff} \
+          --output-gene-map {output.gene_map} \
+          --output-proteins {output.proteins} \
+          --output-qc {output.qc} \
+          > {log} 2>&1
+        """
+
+
+rule single_sample_tag:
+    input:
+        mcscanx_bin=MCScanX_BIN,
+        mcscanx_gff=f"{WORK}/{{sample}}/{{sample}}.gff",
+        gene_map=f"{WORK}/{{sample}}/{{sample}}.map",
+        proteins=f"{WORK}/{{sample}}/{{sample}}_renamed_protein.faa",
+    output:
+        blast_raw=temp(f"{WORK}/{{sample}}/{{sample}}.blast.raw"),
+        blast=f"{WORK}/{{sample}}/{{sample}}.blast",
+        tandem=f"{WORK}/{{sample}}/{{sample}}.tandem",
+        cluster=f"{RESULTS}/local_tags/{{sample}}/{{sample}}_gene.cluster",
+    params:
+        workdir=lambda wc: f"{WORK}/{wc.sample}",
+        identity=config.get("tag", {}).get("blastp_identity", 20),
+        coverage=config.get("tag", {}).get("blastp_query_coverage", 20),
+    threads:
+        config.get("tag", {}).get("diamond_threads", 4)
+    resources:
+        mem_mb=config.get("resources", {}).get("single_sample_mem_mb", 16000),
+        runtime=config.get("resources", {}).get("single_sample_runtime_min", 240),
+    log:
+        f"{LOGS}/single_sample_tag/{{sample}}.log",
+    shell:
+        """
+        mkdir -p $(dirname {output.cluster}) $(dirname {log})
+        python -m pantag.single_sample_tag \
+          --sample-id {wildcards.sample} \
+          --workdir {params.workdir} \
+          --mcscanx-bin {input.mcscanx_bin} \
+          --mcscanx-gff {input.mcscanx_gff} \
+          --gene-map {input.gene_map} \
+          --proteins {input.proteins} \
+          --threads {threads} \
+          --min-identity {params.identity} \
+          --min-query-coverage {params.coverage} \
+          --output-blast-raw {output.blast_raw} \
+          --output-blast {output.blast} \
+          --output-tandem {output.tandem} \
+          --output-cluster {output.cluster} \
+          > {log} 2>&1
+        """
+
+
+rule retrieve_pseudogenes:
+    input:
+        cluster=f"{RESULTS}/local_tags/{{sample}}/{{sample}}_gene.cluster",
+        proteins=f"{WORK}/{{sample}}/{{sample}}_renamed_protein.faa",
+        gff=sample_gff,
+        fasta=sample_fasta,
+    output:
+        final=f"{RESULTS}/local_tags/{{sample}}/{{sample}}_with_10_flanking_cleaned.txt",
+    params:
+        workdir=lambda wc: f"{WORK}/{wc.sample}/pseudogenes",
+        flank_bp=config.get("tag", {}).get("pseudogene_flank_bp", 50000),
+        flank_genes=config.get("tag", {}).get("flank_gene_count", 10),
+        identity=config.get("tag", {}).get("blastx_identity", 20),
+        coverage=config.get("tag", {}).get("blastx_query_coverage", 20),
+    threads:
+        config.get("tag", {}).get("diamond_threads", 4)
+    resources:
+        mem_mb=config.get("resources", {}).get("pseudogene_mem_mb", 16000),
+        runtime=config.get("resources", {}).get("pseudogene_runtime_min", 240),
+    log:
+        f"{LOGS}/retrieve_pseudogenes/{{sample}}.log",
+    shell:
+        """
+        mkdir -p {params.workdir} $(dirname {output.final}) $(dirname {log})
+        python -m pantag.retrieve_pseudogenes \
+          --sample-id {wildcards.sample} \
+          --cluster {input.cluster} \
+          --proteins {input.proteins} \
+          --gff {input.gff} \
+          --fasta {input.fasta} \
+          --workdir {params.workdir} \
+          --threads {threads} \
+          --flank-bp {params.flank_bp} \
+          --flank-gene-count {params.flank_genes} \
+          --min-identity {params.identity} \
+          --min-query-coverage {params.coverage} \
+          --output {output.final} \
+          > {log} 2>&1
+        """
+
+
+rule merge:
+    input:
+        local_tags=expand(
+            f"{RESULTS}/local_tags/{{sample}}/{{sample}}_with_10_flanking_cleaned.txt",
+            sample=ALL_SAMPLES,
+        ),
+    output:
+        tags=f"{RESULTS}/global/pangenome_TAGs.tsv",
+        members=f"{RESULTS}/global/pangenome_TAG_members.tsv",
+        mapping=f"{RESULTS}/global/local_to_global.tsv",
+        evidence=f"{RESULTS}/global/reconciliation_evidence.tsv",
+        fusions=f"{RESULTS}/global/fusion_events.tsv",
+    params:
+        reference=REFERENCE,
+        threshold=config.get("merge", {}).get("member_overlap_threshold", 0.1),
+    resources:
+        mem_mb=config.get("resources", {}).get("merge_mem_mb", 32000),
+        runtime=config.get("resources", {}).get("merge_runtime_min", 480),
+    log:
+        f"{LOGS}/merge.log",
+    shell:
+        """
+        mkdir -p $(dirname {output.tags}) $(dirname {log})
+        python -m pantag.merge \
+          --reference-sample {params.reference} \
+          --local-tags {input.local_tags} \
+          --member-overlap-threshold {params.threshold} \
+          --output-tags {output.tags} \
+          --output-members {output.members} \
+          --output-mapping {output.mapping} \
+          --output-evidence {output.evidence} \
+          --output-fusions {output.fusions} \
+          > {log} 2>&1
+        """
