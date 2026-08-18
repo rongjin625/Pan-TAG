@@ -3,14 +3,11 @@ set -euo pipefail
 
 # Build Pan-TAG's modified MCScanX from the bundled source archive.
 #
-# Project layout:
-#   PAN_TAG/
-#   ©À©¤©¤ src/pantag/mcscanx/build.sh
-#   ©À©¤©¤ src/pantag/mcscanx/MCScanX-source.tar.gz
-#   ©¸©¤©¤ work/
+# Usage:
+#   build.sh OUTPUT_BIN BUILD_INFO
 #
-# Output:
-#   work/software/MCScanX_pantag
+# Snakefile supplies both paths from config.work_dir. Optional defaults keep
+# the script convenient for a manual build in the source checkout.
 #
 # The temporary extracted source directory is deleted after a successful build.
 
@@ -18,10 +15,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 SOURCE_ARCHIVE="${SCRIPT_DIR}/MCScanX-source.tar.gz"
-SOFTWARE_DIR="${PROJECT_ROOT}/work/software"
+OUTPUT_BIN="${1:-${PROJECT_ROOT}/work/software/MCScanX_pantag}"
+BUILD_INFO="${2:-${PROJECT_ROOT}/work/software/MCScanX_pantag.build_info.txt}"
+SOFTWARE_DIR="$(dirname "${OUTPUT_BIN}")"
 BUILD_DIR="${SOFTWARE_DIR}/MCScanX-build"
-OUTPUT_BIN="${SOFTWARE_DIR}/MCScanX_pantag"
-BUILD_INFO="${SOFTWARE_DIR}/MCScanX_pantag.build_info.txt"
+
+if [[ "$(dirname "${BUILD_INFO}")" != "${SOFTWARE_DIR}" ]]; then
+    echo "[ERROR] OUTPUT_BIN and BUILD_INFO must use the same directory." >&2
+    exit 2
+fi
 
 CXX_BIN="${CXX:-g++}"
 

@@ -6,17 +6,29 @@ build-backend = "setuptools.build_meta"
 name = "pan-tag"
 version = "0.1.0"
 description = "Identify and reconcile tandemly arrayed gene clusters in pangenomes."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "biopython>=1.85",
+  "matplotlib==3.9.3",
+  "numpy>=2.2",
   "pyyaml>=6",
+  "scipy>=1.15",
 ]
 
+# pysam is intentionally supplied by pixi.toml from conda/bioconda.  Asking
+# the editable PyPI project to install it again triggers a slow HTSlib source
+# build on glibc 2.17 clusters.
+
 [project.scripts]
+pantag = "pantag.cli:main"
 pantag-prepare = "pantag.prepare:main"
 pantag-single-sample-tag = "pantag.single_sample_tag:main"
 pantag-retrieve-pseudogenes = "pantag.retrieve_pseudogenes:main"
 pantag-merge = "pantag.merge:main"
+pantag-refine = "pantag.refine:main"
+pantag-downstream-extract = "pantag.downstream.extract:main"
+pantag-downstream-cluster = "pantag.downstream.cluster:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

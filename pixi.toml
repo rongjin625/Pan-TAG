@@ -15,9 +15,13 @@ run = "snakemake --snakefile workflow/Snakefile --configfile config/config.yaml 
 build-mcscanx = "bash src/pantag/mcscanx/build.sh"
 
 [dependencies]
-python = ">=3.14.6,<3.15"
+python = "3.12.*"
 biopython = ">=1.87,<2"
+numpy = ">=2.2,<3"
+scipy = ">=1.15,<2"
+matplotlib-base = "3.9.3.*"
 pyyaml = ">=6.0.3,<7"
+pysam = "0.23.3.*"
 gffread = ">=0.12.9,<0.13"
 snakemake = ">=9.23.1,<10"
 diamond = ">=2.1,<3"

@@ -26,6 +26,16 @@ from typing import Any
 import yaml
 from Bio import SeqIO
 
+from .gff import (
+    gene_id,
+    gene_name,
+    load_schema,
+    normalize_id,
+    parse_attributes,
+    transcript_ids,
+    transcript_parent,
+)
+
 
 VERSION = "0.1.0"
 
@@ -61,6 +71,19 @@ def command_validate_inputs(args: argparse.Namespace) -> int:
         raise PanTagPrepareError("config.yaml is missing the 'reference' section.")
 
     problems: list[str] = []
+    annotation = config.get("annotation", {})
+    annotation_mode = str(annotation.get("mode", "liftoff")).strip().lower()
+    if annotation_mode not in {"liftoff", "provided"}:
+        problems.append("annotation.mode must be 'liftoff' or 'provided'")
+
+    refine = config.get("refine", {})
+    try:
+        flank_overlap_threshold = float(refine.get("flank_overlap_threshold", 0.20))
+    except (TypeError, ValueError):
+        problems.append("refine.flank_overlap_threshold must be a number from 0 to 1")
+    else:
+        if not 0 <= flank_overlap_threshold <= 1:
+            problems.append("refine.flank_overlap_threshold must be between 0 and 1")
 
     reference_id = str(reference.get("sample_id", "")).strip()
     reference_fasta = str(reference.get("fasta", "")).strip()
@@ -76,12 +99,11 @@ def command_validate_inputs(args: argparse.Namespace) -> int:
 
     with samples_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        required_columns = {"sample_id", "fasta"}
-        missing_columns = required_columns - set(reader.fieldnames or [])
-        if missing_columns:
+        required_columns = ["sample_id", "fasta", "gff"]
+        if reader.fieldnames != required_columns:
             raise PanTagPrepareError(
-                "samples.tsv is missing columns: "
-                + ", ".join(sorted(missing_columns))
+                "samples.tsv must contain exactly three columns in this order: "
+                "sample_id, fasta, gff"
             )
 
         samples: list[dict[str, str]] = []
@@ -90,24 +112,42 @@ def command_validate_inputs(args: argparse.Namespace) -> int:
         for line_number, row in enumerate(reader, start=2):
             sample_id = (row.get("sample_id") or "").strip()
             fasta = (row.get("fasta") or "").strip()
+            gff = (row.get("gff") or "").strip()
 
             if not sample_id:
                 problems.append(f"samples.tsv line {line_number}: empty sample_id")
                 continue
+            if line_number == 2 and sample_id != reference_id:
+                problems.append(
+                    "The first samples.tsv row must match reference.sample_id"
+                )
             if sample_id in seen_sample_ids:
                 problems.append(f"Duplicate sample_id: {sample_id}")
+            seen_sample_ids.add(sample_id)
             if not fasta:
                 problems.append(
                     f"samples.tsv line {line_number}: empty FASTA path"
                 )
+            if sample_id == reference_id:
+                if fasta and fasta != reference_fasta:
+                    problems.append(
+                        "Reference FASTA differs between config.yaml and samples.tsv"
+                    )
+                if gff and gff != reference_gff:
+                    problems.append(
+                        "Reference GFF differs between config.yaml and samples.tsv"
+                    )
+                continue
+            if annotation_mode == "liftoff" and gff:
+                problems.append(
+                    f"samples.tsv line {line_number}: gff must be empty in liftoff mode"
+                )
+            if annotation_mode == "provided" and not gff:
+                problems.append(
+                    f"samples.tsv line {line_number}: gff is required in provided mode"
+                )
 
-            seen_sample_ids.add(sample_id)
-            samples.append({"sample_id": sample_id, "fasta": fasta})
-
-    if reference_id and reference_id in seen_sample_ids:
-        problems.append(
-            "The reference sample must not be repeated in samples.tsv."
-        )
+            samples.append({"sample_id": sample_id, "fasta": fasta, "gff": gff})
 
     files_to_check = [
         ("reference FASTA", reference_fasta),
@@ -118,6 +158,26 @@ def command_validate_inputs(args: argparse.Namespace) -> int:
         for row in samples
         if row["fasta"]
     )
+    files_to_check.extend(
+        (f"sample GFF3 [{row['sample_id']}]", row["gff"])
+        for row in samples
+        if row["gff"]
+    )
+
+    liftoff_samples = samples if annotation_mode == "liftoff" else []
+    if annotation_mode == "liftoff":
+        liftoff = config.get("liftoff")
+        if not isinstance(liftoff, dict):
+            problems.append(
+                "config.yaml requires a 'liftoff' section because some samples have no GFF"
+            )
+        else:
+            for key in ("feature_types",):
+                value = str(liftoff.get(key, "")).strip()
+                if not value:
+                    problems.append(f"Missing config value: liftoff.{key}")
+                elif not Path(value).is_file():
+                    problems.append(f"Liftoff input does not exist: {value}")
 
     for label, filename in files_to_check:
         if filename and not Path(filename).is_file():
@@ -126,7 +186,10 @@ def command_validate_inputs(args: argparse.Namespace) -> int:
     report = {
         "status": "PASS" if not problems else "FAIL",
         "reference_sample": reference_id,
+        "annotation_mode": annotation_mode,
         "target_sample_count": len(samples),
+        "provided_gff_count": sum(bool(row["gff"]) for row in samples),
+        "liftoff_sample_count": len(liftoff_samples),
         "problems": problems,
     }
 
@@ -148,168 +211,136 @@ def command_validate_inputs(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# tag-inputs: faithful packaging of pipeline1 + pipeline2
+# tag-inputs
 # ---------------------------------------------------------------------------
+def command_tag_inputs(args: argparse.Namespace) -> int:
+    schema = load_schema(args.config)
+    gene_features = {value.lower() for value in schema.gene_feature_types}
+    transcript_features = {value.lower() for value in schema.transcript_feature_types}
+    genes: dict[str, dict[str, Any]] = {}
+    transcript_to_gene: dict[str, str] = {}
+    fallback_name_count = 0
+    coding_values = {value.lower() for value in schema.coding_values}
+    excluded_terms = {
+        value.lower() for value in schema.excluded_attribute_terms if value
+    }
 
-def legacy_prepare_gff_filtered(
-    input_gff: str | Path,
-    output_gff: str | Path,
-    map_out: str | Path,
-) -> tuple[int, int]:
-    """Faithful implementation of pipeline1_get_clean_gff.py."""
-    genes: list[dict[str, Any]] = []
-
-    with Path(input_gff).open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.startswith("#") or not line.strip():
+    with Path(args.annotation_gff).open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip() or line.startswith("#"):
                 continue
-            parts = line.strip().split("\t")
+            parts = line.rstrip("\n").split("\t")
             if len(parts) < 9:
                 raise PanTagPrepareError(
-                    f"Malformed GFF line in {input_gff}: {line.rstrip()}"
+                    f"Malformed GFF row {line_number}: {line.rstrip()}"
                 )
-            if parts[2] != "gene":
+            feature = parts[2].lower()
+            attributes = parse_attributes(parts[8])
+            if feature in gene_features:
+                identifier = gene_id(attributes, schema)
+                if not identifier:
+                    continue
+                name, used_fallback = gene_name(attributes, schema, identifier)
+                if not name:
+                    continue
+                fallback_name_count += int(used_fallback)
+                genes[identifier] = {
+                    "chrom": parts[0],
+                    "start": int(parts[3]),
+                    "end": int(parts[4]),
+                    "gid": identifier,
+                    "gname": name,
+                    "biotypes": {
+                        value.strip().lower()
+                        for key in schema.biotype_keys
+                        for value in attributes.get(key, "").split(",")
+                        if value.strip()
+                    },
+                    "excluded_by_attribute": any(
+                        term in parts[8].lower() for term in excluded_terms
+                    ),
+                }
+            elif feature in transcript_features:
+                parent = transcript_parent(attributes, schema)
+                if parent:
+                    for identifier in transcript_ids(attributes, schema):
+                        transcript_to_gene[identifier] = parent
+
+    coding_annotation_available = any(
+        bool(gene["biotypes"] & coding_values) for gene in genes.values()
+    )
+    apply_biotype_filter = schema.coding_filter_mode == "biotype" or (
+        schema.coding_filter_mode == "auto" and coding_annotation_available
+    )
+    excluded_attribute_genes = sum(
+        bool(gene["excluded_by_attribute"]) for gene in genes.values()
+    )
+    noncoding_biotype_genes = sum(
+        apply_biotype_filter and not bool(gene["biotypes"] & coding_values)
+        for gene in genes.values()
+    )
+
+    best_proteins: dict[str, Any] = {}
+    unmatched_proteins = 0
+    with Path(args.raw_proteins).open(encoding="utf-8") as protein_handle:
+        for record in SeqIO.parse(protein_handle, "fasta"):
+            identifier = normalize_id(record.id, schema.strip_id_prefixes)
+            parent = transcript_to_gene.get(identifier)
+            if parent is None and identifier in genes:
+                parent = identifier
+            if parent not in genes:
+                unmatched_proteins += 1
                 continue
+            clean_sequence = str(record.seq).replace("*", "").replace(".", "")
+            if not clean_sequence:
+                continue
+            record.seq = record.seq.__class__(clean_sequence)
+            record.id = parent
+            record.description = ""
+            if parent not in best_proteins or len(record.seq) > len(best_proteins[parent].seq):
+                best_proteins[parent] = record
 
-            attr = parts[8]
-            if "gene_type=protein_coding" in attr and "readthrough_gene" not in attr:
-                info: dict[str, str] = {}
-                for item in attr.split(";"):
-                    if "=" in item:
-                        key, value = item.split("=", 1)
-                        info[key] = value
-
-                gid = info.get("ID") or info.get("gene_id")
-                gname = info.get("gene_name") or gid
-                if gid:
-                    genes.append(
-                        {
-                            "chrom": parts[0],
-                            "start": int(parts[3]),
-                            "end": int(parts[4]),
-                            "gid": gid,
-                            "gname": gname,
-                        }
-                    )
-
-    genes.sort(key=lambda item: (item["chrom"], item["start"], -item["end"]))
-
-    filtered_genes: list[dict[str, Any]] = []
+    translated_genes = [
+        genes[identifier]
+        for identifier in best_proteins
+        if not genes[identifier]["excluded_by_attribute"]
+        and (
+            not apply_biotype_filter
+            or bool(genes[identifier]["biotypes"] & coding_values)
+        )
+    ]
+    translated_genes.sort(key=lambda item: (item["chrom"], item["start"], -item["end"]))
+    retained_genes: list[dict[str, Any]] = []
     nested_skipped = 0
-    if genes:
-        last_gene = genes[0]
-        filtered_genes.append(last_gene)
-        for curr in genes[1:]:
-            if curr["chrom"] != last_gene["chrom"]:
-                filtered_genes.append(curr)
-                last_gene = curr
-                continue
-            if curr["end"] <= last_gene["end"]:
-                sys.stderr.write(
-                    f"[Nested] 跳过被包含基因: {curr['gid']} "
-                    f"(在 {last_gene['gid']} 内部)\n"
-                )
-                nested_skipped += 1
-                continue
-            filtered_genes.append(curr)
-            last_gene = curr
+    last_by_chrom: dict[str, dict[str, Any]] = {}
+    for gene in translated_genes:
+        previous = last_by_chrom.get(gene["chrom"])
+        if previous is not None and gene["end"] <= previous["end"]:
+            nested_skipped += 1
+            continue
+        retained_genes.append(gene)
+        last_by_chrom[gene["chrom"]] = gene
 
-    output_gff_path = ensure_parent(output_gff)
-    map_out_path = ensure_parent(map_out)
+    retained_ids = {str(gene["gid"]) for gene in retained_genes}
     with (
-        output_gff_path.open("w", encoding="utf-8") as gff_handle,
-        map_out_path.open("w", encoding="utf-8") as map_handle,
+        ensure_parent(args.output_mcscanx_gff).open("w", encoding="utf-8") as gff_handle,
+        ensure_parent(args.output_gene_map).open("w", encoding="utf-8") as map_handle,
+        ensure_parent(args.output_proteins).open("w", encoding="utf-8") as protein_handle,
     ):
         map_handle.write("Gene_ID\tGene_Name\n")
-        for gene in filtered_genes:
+        for gene in retained_genes:
             gff_handle.write(
                 f"{gene['chrom']}\t{gene['gid']}\t{gene['start']}\t{gene['end']}\n"
             )
             map_handle.write(f"{gene['gid']}\t{gene['gname']}\n")
+        SeqIO.write(
+            (best_proteins[str(gene["gid"])] for gene in retained_genes),
+            protein_handle,
+            "fasta",
+        )
 
-    return len(filtered_genes), nested_skipped
-
-
-def legacy_filter_longest_and_rename(
-    raw_faa: str | Path,
-    filtered_gff: str | Path,
-    original_gff: str | Path,
-    output_faa: str | Path,
-) -> tuple[int, int]:
-    """Faithful implementation of pipeline2_filter_longest_and_rename.py."""
-    whitelist_gids: set[str] = set()
-    with Path(filtered_gff).open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.startswith("#") or not line.strip():
-                continue
-            parts = line.strip().split("\t")
-            if len(parts) < 2:
-                raise PanTagPrepareError(
-                    f"Malformed four-column GFF line: {line.rstrip()}"
-                )
-            whitelist_gids.add(parts[1])
-
-    print(f"[*] 已加载白名单基因数量: {len(whitelist_gids)}")
-
-    tid_to_gid: dict[str, str] = {}
-    with Path(original_gff).open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.startswith("#") or not line.strip():
-                continue
-            parts = line.strip().split("\t")
-            if len(parts) < 9:
-                raise PanTagPrepareError(
-                    f"Malformed GFF line in {original_gff}: {line.rstrip()}"
-                )
-            if parts[2] in ["mRNA", "transcript"]:
-                attr = parts[8]
-                tid = ""
-                gid = ""
-                for item in attr.split(";"):
-                    if item.startswith("ID="):
-                        tid = item.split("=", 1)[1]
-                    if item.startswith("gene_id="):
-                        gid = item.split("=", 1)[1]
-                if tid and gid in whitelist_gids:
-                    tid_to_gid[tid] = gid
-
-    gene_best_records: dict[str, Any] = {}
-    for record in SeqIO.parse(str(raw_faa), "fasta"):
-        tid = record.id
-        gid = tid_to_gid.get(tid)
-        if not gid:
-            continue
-
-        clean_seq = str(record.seq).replace("*", "").replace(".", "")
-        record.seq = record.seq.__class__(clean_seq)
-        seq_len = len(clean_seq)
-
-        if gid not in gene_best_records or seq_len > len(gene_best_records[gid].seq):
-            record.id = gid
-            record.description = ""
-            gene_best_records[gid] = record
-
-    output_path = ensure_parent(output_faa)
-    with output_path.open("w", encoding="utf-8") as handle:
-        SeqIO.write(gene_best_records.values(), handle, "fasta")
-
-    print(f"[*] 最终提取蛋白数量: {len(gene_best_records)}")
-    return len(whitelist_gids), len(gene_best_records)
-
-
-def command_tag_inputs(args: argparse.Namespace) -> int:
-    retained, nested_skipped = legacy_prepare_gff_filtered(
-        input_gff=args.annotation_gff,
-        output_gff=args.output_mcscanx_gff,
-        map_out=args.output_gene_map,
-    )
-
-    whitelist_count, protein_count = legacy_filter_longest_and_rename(
-        raw_faa=args.raw_proteins,
-        filtered_gff=args.output_mcscanx_gff,
-        original_gff=args.annotation_gff,
-        output_faa=args.output_proteins,
-    )
+    retained = len(retained_genes)
+    protein_count = len(retained_ids)
 
     if args.output_qc:
         qc_path = ensure_parent(args.output_qc)
@@ -319,7 +350,13 @@ def command_tag_inputs(args: argparse.Namespace) -> int:
             writer.writerow(["sample_id", args.sample_id])
             writer.writerow(["retained_mcscanx_genes", retained])
             writer.writerow(["nested_genes_skipped", nested_skipped])
-            writer.writerow(["protein_whitelist_genes", whitelist_count])
+            writer.writerow(["translated_protein_genes", len(best_proteins)])
+            writer.writerow(["coding_filter_mode", schema.coding_filter_mode])
+            writer.writerow(["biotype_filter_applied", str(apply_biotype_filter).lower()])
+            writer.writerow(["noncoding_biotype_genes_filtered", noncoding_biotype_genes])
+            writer.writerow(["excluded_attribute_genes", excluded_attribute_genes])
+            writer.writerow(["gene_name_fallback_to_id", fallback_name_count])
+            writer.writerow(["unmatched_protein_records", unmatched_proteins])
             writer.writerow(["longest_proteins_written", protein_count])
 
     print(
@@ -356,6 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate MCScanX GFF/map and longest-protein FASTA.",
     )
     tag_inputs.add_argument("--sample-id", required=True)
+    tag_inputs.add_argument("--config", required=True)
     tag_inputs.add_argument("--annotation-gff", required=True)
     tag_inputs.add_argument("--raw-proteins", required=True)
     tag_inputs.add_argument("--output-mcscanx-gff", required=True)

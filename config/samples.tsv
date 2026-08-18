@@ -1,11 +1,12 @@
-sample_id	fasta
-C001-CHA-E01_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C001-CHA-E01_hap1.fa
-C001-CHA-E01_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C001-CHA-E01_hap2.fa
-C002-CHA-E02_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C002-CHA-E02_hap1.fa
-C002-CHA-E02_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C002-CHA-E02_hap2.fa
-C003-CHA-E03_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C003-CHA-E03_hap1.fa
-C003-CHA-E03_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C003-CHA-E03_hap2.fa
-C004-CHA-E04_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C004-CHA-E04_hap1.fa
-C004-CHA-E04_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C004-CHA-E04_hap2.fa
-C005-CHA-E05_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C005-CHA-E05_hap1.fa
-C005-CHA-E05_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C005-CHA-E05_hap2.fa
+sample_id	fasta	gff
+chm13	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/chm13.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/gff/chm13.gff
+C001-CHA-E01_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C001-CHA-E01_hap1.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C001-CHA-E01_hap1/C001-CHA-E01_hap1.liftoff.gff3
+C001-CHA-E01_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C001-CHA-E01_hap2.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C001-CHA-E01_hap2/C001-CHA-E01_hap2.liftoff.gff3
+C002-CHA-E02_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C002-CHA-E02_hap1.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C002-CHA-E02_hap1/C002-CHA-E02_hap1.liftoff.gff3
+C002-CHA-E02_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C002-CHA-E02_hap2.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C002-CHA-E02_hap2/C002-CHA-E02_hap2.liftoff.gff3
+C003-CHA-E03_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C003-CHA-E03_hap1.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C003-CHA-E03_hap1/C003-CHA-E03_hap1.liftoff.gff3
+C003-CHA-E03_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C003-CHA-E03_hap2.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C003-CHA-E03_hap2/C003-CHA-E03_hap2.liftoff.gff3
+C004-CHA-E04_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C004-CHA-E04_hap1.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C004-CHA-E04_hap1/C004-CHA-E04_hap1.liftoff.gff3
+C004-CHA-E04_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C004-CHA-E04_hap2.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C004-CHA-E04_hap2/C004-CHA-E04_hap2.liftoff.gff3
+C005-CHA-E05_hap1	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C005-CHA-E05_hap1.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C005-CHA-E05_hap1/C005-CHA-E05_hap1.liftoff.gff3
+C005-CHA-E05_hap2	/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/C005-CHA-E05_hap2.fa	/share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/previous_runs/run_before_annotation_schema_20260807_090737/results/liftoff/C005-CHA-E05_hap2/C005-CHA-E05_hap2.liftoff.gff3
