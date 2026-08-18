@@ -49,8 +49,9 @@ def filter_blastp(
     output_path: str | Path,
     min_identity: float,
     min_query_coverage: float,
+    min_subject_coverage: float,
 ) -> int:
-    """Replace the legacy awk '$3 >= x && $13 >= y' filter."""
+    """Filter DIAMOND hits by identity and both sequence coverages."""
     retained = 0
     output = ensure_parent(output_path)
     with Path(raw_path).open("r", encoding="utf-8") as source, output.open(
@@ -60,22 +61,31 @@ def filter_blastp(
             if not line.strip():
                 continue
             fields = line.rstrip("\n").split("\t")
-            if len(fields) < 13:
+            if len(fields) < 14:
                 raise SingleSampleTagError(
-                    f"DIAMOND row {line_number} has {len(fields)} columns; expected 13"
+                    f"DIAMOND row {line_number} has {len(fields)} columns; expected 14"
                 )
             if (
                 float(fields[2]) >= min_identity
                 and float(fields[12]) >= min_query_coverage
+                and float(fields[13]) >= min_subject_coverage
             ):
                 target.write(line if line.endswith("\n") else line + "\n")
                 retained += 1
     return retained
 
 
-def family_prefix(name: str) -> str:
-    """Preserve pipeline3's family-prefix rule."""
-    return re.split(r"\d", str(name))[0].rstrip("-")
+def family_prefix(name: str, strategy: str, pattern: str = "") -> str:
+    if strategy == "none":
+        return str(name)
+    if strategy == "first_digit_prefix":
+        return re.split(r"\d", str(name))[0].rstrip("-")
+    if strategy == "regex":
+        match = re.search(pattern, str(name))
+        if match is None:
+            return str(name)
+        return match.group(1) if match.groups() else match.group(0)
+    raise SingleSampleTagError(f"Unknown family merge strategy: {strategy}")
 
 
 def format_member_names(ids: list[str], id_to_name: dict[str, str]) -> str:
@@ -111,6 +121,8 @@ def build_clusters(
     tandem_file: str | Path,
     gene_map: str | Path,
     output_file: str | Path,
+    family_merge_strategy: str = "none",
+    family_merge_regex: str = "",
 ) -> int:
     """Build local TAGs using pipeline3's connected-component behavior."""
     id_to_name = load_gene_map(gene_map)
@@ -185,11 +197,19 @@ def build_clusters(
             current_ids = list(current["ids"])
             following_ids = list(following["ids"])
             current_prefixes = {
-                family_prefix(id_to_name.get(gene_id, gene_id))
+                family_prefix(
+                    id_to_name.get(gene_id, gene_id),
+                    family_merge_strategy,
+                    family_merge_regex,
+                )
                 for gene_id in current_ids
             }
             following_prefixes = {
-                family_prefix(id_to_name.get(gene_id, gene_id))
+                family_prefix(
+                    id_to_name.get(gene_id, gene_id),
+                    family_merge_strategy,
+                    family_merge_regex,
+                )
                 for gene_id in following_ids
             }
             if (
@@ -221,8 +241,8 @@ def build_clusters(
                 "Start",
                 "End",
                 "Length",
-                "Up_5th_ID",
-                "Down_5th_ID",
+                "Upstream_5th_Gene",
+                "Downstream_5th_Gene",
                 "Members_Annotated",
                 "Members_IDs",
             ]
@@ -234,10 +254,18 @@ def build_clusters(
             first_index = ordered_chrom.index(ids[0])
             last_index = ordered_chrom.index(ids[-1])
             upstream = (
-                ordered_chrom[first_index - 5] if first_index >= 5 else "START"
+                id_to_name.get(
+                    ordered_chrom[first_index - 5],
+                    ordered_chrom[first_index - 5],
+                )
+                if first_index >= 5
+                else "START"
             )
             downstream = (
-                ordered_chrom[last_index + 5]
+                id_to_name.get(
+                    ordered_chrom[last_index + 5],
+                    ordered_chrom[last_index + 5],
+                )
                 if last_index + 5 < len(ordered_chrom)
                 else "END"
             )
@@ -249,7 +277,7 @@ def build_clusters(
                     chrom,
                     start,
                     end,
-                    end - start,
+                    end - start + 1,
                     upstream,
                     downstream,
                     format_member_names(ids, id_to_name),
@@ -260,6 +288,10 @@ def build_clusters(
 
 
 def command_run(args: argparse.Namespace) -> int:
+    if args.output_final and not all((args.config, args.gff, args.fasta)):
+        raise SingleSampleTagError(
+            "--output-final requires --config, --gff and --fasta"
+        )
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     database_prefix = workdir / f"{args.sample_id}_db"
@@ -315,6 +347,7 @@ def command_run(args: argparse.Namespace) -> int:
             "evalue",
             "bitscore",
             "qcovhsp",
+            "scovhsp",
         ]
     )
     retained = filter_blastp(
@@ -322,6 +355,7 @@ def command_run(args: argparse.Namespace) -> int:
         args.output_blast,
         args.min_identity,
         args.min_query_coverage,
+        args.min_subject_coverage,
     )
     if Path(args.output_blast).resolve() != expected_blast.resolve():
         shutil.copyfile(args.output_blast, expected_blast)
@@ -340,7 +374,51 @@ def command_run(args: argparse.Namespace) -> int:
         args.output_tandem,
         args.gene_map,
         args.output_cluster,
+        args.family_merge_strategy,
+        args.family_merge_regex,
     )
+    if args.output_final:
+        from .gff import load_schema
+        from .retrieve_pseudogenes import (
+            add_flanks,
+            finalize_tag_metrics,
+            load_gene_records,
+            read_table,
+            strict_qc,
+            write_table,
+        )
+
+        schema = load_schema(args.config)
+        coordinates, chrom_genes, positions, names, pseudogenes = load_gene_records(
+            args.gff, schema
+        )
+        _, rows = read_table(args.output_cluster)
+        for row in rows:
+            row["Pseudos_Annotated"] = "None"
+            row["Pseudos_IDs"] = "None"
+        add_flanks(rows, chrom_genes, positions, names, args.flank_gene_count)
+        finalize_tag_metrics(
+            rows,
+            coordinates,
+            chrom_genes,
+            {str(item["id"]) for item in pseudogenes},
+        )
+        retained_rows, qc_statuses = strict_qc(
+            rows, coordinates, args.fasta, args.flank_gene_count
+        )
+        write_table(
+            args.output_final,
+            [
+                "Cluster_ID", "Size", "Chromosome", "Start", "End", "Length",
+                "Gene_Density_per_kb", "Members_Annotated", "Members_IDs",
+                "Upstream_Genes", "Downstream_Genes",
+            ],
+            retained_rows,
+        )
+        print(
+            "[Pan-TAG QC] "
+            + " ".join(f"{key}={value}" for key, value in sorted(qc_statuses.items()))
+        )
     print(
         f"[Pan-TAG] {args.sample_id}: {retained} blastp hit(s), "
         f"{clusters} local TAG(s)."
@@ -359,11 +437,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--min-identity", type=float, default=20.0)
     parser.add_argument("--min-query-coverage", type=float, default=20.0)
+    parser.add_argument("--min-subject-coverage", type=float, default=20.0)
     parser.add_argument("--diamond-bin", default="diamond")
+    parser.add_argument(
+        "--family-merge-strategy",
+        choices=("none", "first_digit_prefix", "regex"),
+        default="none",
+    )
+    parser.add_argument("--family-merge-regex", default="")
     parser.add_argument("--output-blast-raw", required=True)
     parser.add_argument("--output-blast", required=True)
     parser.add_argument("--output-tandem", required=True)
     parser.add_argument("--output-cluster", required=True)
+    parser.add_argument("--output-final")
+    parser.add_argument("--config")
+    parser.add_argument("--gff")
+    parser.add_argument("--fasta")
+    parser.add_argument("--flank-gene-count", type=int, default=10)
     return parser
 
 

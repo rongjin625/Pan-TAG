@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+CLEAN_SUFFIX = re.compile(r"(_\d+|\(\d+\))+$")
 
 
 class MergeError(RuntimeError):
@@ -32,25 +36,27 @@ def clean_values(value: str) -> set[str]:
         item = item.strip()
         if not item or item.lower() in {"none", "boundary", "start", "end"}:
             continue
-        result.add(re.sub(r"(_\d+|\(\d+\))+$", "", item))
+        result.add(CLEAN_SUFFIX.sub("", item))
     return result
 
 
 def raw_values(value: str) -> set[str]:
-    return {
-        item.strip()
-        for item in (value or "").split(",")
-        if item.strip()
-        and item.strip().lower() not in {"none", "boundary", "start", "end"}
-    }
+    result: set[str] = set()
+    for item in (value or "").split(","):
+        cleaned = item.strip()
+        if cleaned and cleaned.lower() not in {"none", "boundary", "start", "end"}:
+            result.add(cleaned)
+    return result
 
 
 def sample_from_path(path: str | Path) -> str:
     file_path = Path(path)
+    for suffix in ("_TAGs.tsv",):
+        if file_path.name.endswith(suffix):
+            return file_path.name.removesuffix(suffix)
     if file_path.parent.name:
         return file_path.parent.name
-    suffix = "_with_10_flanking_cleaned.txt"
-    return file_path.name.removesuffix(suffix)
+    return file_path.stem
 
 
 @dataclass
@@ -64,18 +70,14 @@ class LocalTag:
     pseudo_ids: set[str]
     left_flanks: set[str]
     right_flanks: set[str]
+    names: set[str] = field(init=False)
+    members: set[str] = field(init=False)
+    flanks: set[str] = field(init=False)
 
-    @property
-    def names(self) -> set[str]:
-        return self.member_names | self.pseudo_names
-
-    @property
-    def members(self) -> set[str]:
-        return self.member_ids | self.pseudo_ids
-
-    @property
-    def flanks(self) -> set[str]:
-        return self.left_flanks | self.right_flanks
+    def __post_init__(self) -> None:
+        self.names = self.member_names | self.pseudo_names
+        self.members = self.member_ids | self.pseudo_ids
+        self.flanks = self.left_flanks | self.right_flanks
 
 
 @dataclass
@@ -86,27 +88,25 @@ class GlobalTag:
     members: set[str]
     left_flanks: set[str]
     right_flanks: set[str]
-    local_tags: list[LocalTag] = field(default_factory=list)
+    local_tags: list[tuple[str, str]] = field(default_factory=list)
     score_sum: float = 1.0
     match_count: int = 1
     min_score: float = 1.0
     active: bool = True
+    flanks: set[str] = field(init=False)
 
-    @property
-    def flanks(self) -> set[str]:
-        return self.left_flanks | self.right_flanks
+    def __post_init__(self) -> None:
+        self.flanks = self.left_flanks | self.right_flanks
 
 
 def load_local_tags(path: str | Path, sample: str) -> list[LocalTag]:
     required = {
         "Cluster_ID",
-        "Chrom",
-        "Up_5th_ID",
-        "Down_5th_ID",
+        "Chromosome",
+        "Upstream_Genes",
+        "Downstream_Genes",
         "Members_Annotated",
         "Members_IDs",
-        "Pseudos_Annotated",
-        "Pseudos_IDs",
     }
     result: list[LocalTag] = []
     with Path(path).open("r", encoding="utf-8", newline="") as handle:
@@ -121,13 +121,13 @@ def load_local_tags(path: str | Path, sample: str) -> list[LocalTag]:
                 LocalTag(
                     sample=sample,
                     cluster_id=row["Cluster_ID"],
-                    chrom=row["Chrom"],
+                    chrom=row["Chromosome"],
                     member_names=clean_values(row["Members_Annotated"]),
                     member_ids=raw_values(row["Members_IDs"]),
-                    pseudo_names=clean_values(row["Pseudos_Annotated"]),
-                    pseudo_ids=raw_values(row["Pseudos_IDs"]),
-                    left_flanks=clean_values(row["Up_5th_ID"]),
-                    right_flanks=clean_values(row["Down_5th_ID"]),
+                    pseudo_names=clean_values(row.get("Pseudos_Annotated", "")),
+                    pseudo_ids=raw_values(row.get("Pseudos_IDs", "")),
+                    left_flanks=clean_values(row["Upstream_Genes"]),
+                    right_flanks=clean_values(row["Downstream_Genes"]),
                 )
             )
     return result
@@ -145,41 +145,98 @@ def flank_jaccard(left: set[str], right: set[str]) -> float:
     return len(left & right) / len(union) if union else 0.0
 
 
-def merge_global_nodes(target: GlobalTag, source: GlobalTag) -> None:
+def index_values(
+    index: dict[str, set[int]], values: set[str], global_index: int
+) -> None:
+    for value in values:
+        index[value].add(global_index)
+
+
+def merge_global_nodes(
+    target: GlobalTag,
+    source: GlobalTag,
+    target_index: int | None = None,
+    name_index: dict[str, set[int]] | None = None,
+    flank_index: dict[str, set[int]] | None = None,
+) -> None:
+    new_names = source.names - target.names
+    new_flanks = source.flanks - target.flanks
     target.names |= source.names
     target.members |= source.members
     target.left_flanks |= source.left_flanks
     target.right_flanks |= source.right_flanks
+    target.flanks |= source.flanks
     target.local_tags.extend(source.local_tags)
     target.score_sum += source.score_sum
     target.match_count += source.match_count
     target.min_score = min(target.min_score, source.min_score)
     source.active = False
+    if target_index is not None and name_index is not None and flank_index is not None:
+        index_values(name_index, new_names, target_index)
+        index_values(flank_index, new_flanks, target_index)
 
 
-def add_local_tag(global_tag: GlobalTag, local_tag: LocalTag, score: float) -> None:
+def add_local_tag(
+    global_tag: GlobalTag,
+    local_tag: LocalTag,
+    score: float,
+    global_index: int | None = None,
+    name_index: dict[str, set[int]] | None = None,
+    flank_index: dict[str, set[int]] | None = None,
+) -> None:
+    new_names = local_tag.names - global_tag.names
+    new_flanks = local_tag.flanks - global_tag.flanks
     global_tag.names |= local_tag.names
     global_tag.members |= local_tag.members
     global_tag.left_flanks |= local_tag.left_flanks
     global_tag.right_flanks |= local_tag.right_flanks
-    global_tag.local_tags.append(local_tag)
+    global_tag.flanks |= local_tag.flanks
+    global_tag.local_tags.append((local_tag.sample, local_tag.cluster_id))
     global_tag.score_sum += score
     global_tag.match_count += 1
     global_tag.min_score = min(global_tag.min_score, score)
+    if global_index is not None and name_index is not None and flank_index is not None:
+        index_values(name_index, new_names, global_index)
+        index_values(flank_index, new_flanks, global_index)
+
+
+def indexed_candidates(
+    local_tag: LocalTag,
+    name_index: dict[str, set[int]],
+    flank_index: dict[str, set[int]],
+) -> list[int]:
+    name_candidates: set[int] = set()
+    for name in local_tag.names:
+        name_candidates.update(name_index.get(name, ()))
+    flank_candidates: set[int] = set()
+    for flank in local_tag.flanks:
+        flank_candidates.update(flank_index.get(flank, ()))
+    return sorted(name_candidates & flank_candidates)
 
 
 def candidate_indices(
-    local_tag: LocalTag, global_tags: list[GlobalTag], threshold: float
+    local_tag: LocalTag,
+    global_tags: list[GlobalTag],
+    threshold: float,
+    require_same_seqid: bool = False,
+    indices: list[int] | None = None,
 ) -> list[dict[str, float | int]]:
     candidates: list[dict[str, float | int]] = []
-    for index, global_tag in enumerate(global_tags):
+    search_indices = indices if indices is not None else range(len(global_tags))
+    for index in search_indices:
+        global_tag = global_tags[index]
         if not global_tag.active:
             continue
-        if local_tag.flanks.isdisjoint(global_tag.flanks):
+        if require_same_seqid and local_tag.chrom != global_tag.chrom:
             continue
-        if local_tag.names.isdisjoint(global_tag.names):
+        if indices is None and local_tag.flanks.isdisjoint(global_tag.flanks):
             continue
-        forward, reverse, score = overlap(local_tag.names, global_tag.names)
+        intersection = len(local_tag.names & global_tag.names)
+        if not intersection:
+            continue
+        forward = intersection / len(local_tag.names) if local_tag.names else 0.0
+        reverse = intersection / len(global_tag.names) if global_tag.names else 0.0
+        score = max(forward, reverse)
         if score < threshold:
             continue
         candidates.append(
@@ -198,15 +255,19 @@ def write_tsv(
     path: str | Path, fieldnames: list[str], rows: list[dict[str, object]]
 ) -> None:
     output = ensure_parent(path)
-    with output.open("w", encoding="utf-8", newline="") as handle:
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle, fieldnames=fieldnames, delimiter="\t", lineterminator="\n"
         )
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(temporary, output)
 
 
 def command_run(args: argparse.Namespace) -> int:
+    require_same_seqid = bool(getattr(args, "require_same_seqid", False))
+    print(f"[Pan-TAG] require_same_seqid={str(require_same_seqid).lower()}")
     paths_by_sample: dict[str, str] = {}
     for path in args.local_tags:
         sample = sample_from_path(path)
@@ -221,16 +282,17 @@ def command_run(args: argparse.Namespace) -> int:
     samples = [args.reference_sample] + sorted(
         sample for sample in paths_by_sample if sample != args.reference_sample
     )
-    local_by_sample = {
-        sample: load_local_tags(paths_by_sample[sample], sample) for sample in samples
-    }
-
     globals_: list[GlobalTag] = []
-    evidence_rows: list[dict[str, object]] = []
-    fusion_rows: list[dict[str, object]] = []
-    redirects: dict[int, int] = {}
+    name_index: dict[str, set[int]] = defaultdict(set)
+    flank_index: dict[str, set[int]] = defaultdict(set)
+    total_local_tags = 0
 
-    for local_tag in local_by_sample[args.reference_sample]:
+    reference_tags = load_local_tags(
+        paths_by_sample[args.reference_sample], args.reference_sample
+    )
+    total_local_tags += len(reference_tags)
+    for local_tag in reference_tags:
+        global_index = len(globals_)
         globals_.append(
             GlobalTag(
                 chrom=local_tag.chrom,
@@ -239,23 +301,31 @@ def command_run(args: argparse.Namespace) -> int:
                 members=set(local_tag.members),
                 left_flanks=set(local_tag.left_flanks),
                 right_flanks=set(local_tag.right_flanks),
-                local_tags=[local_tag],
+                local_tags=[(local_tag.sample, local_tag.cluster_id)],
             )
         )
+        index_values(name_index, local_tag.names, global_index)
+        index_values(flank_index, local_tag.flanks, global_index)
+    del reference_tags
 
     for sample in samples[1:]:
-        for local_tag in local_by_sample[sample]:
+        sample_tags = load_local_tags(paths_by_sample[sample], sample)
+        total_local_tags += len(sample_tags)
+        for local_tag in sample_tags:
+            search_indices = indexed_candidates(local_tag, name_index, flank_index)
             candidates = candidate_indices(
-                local_tag, globals_, args.member_overlap_threshold
+                local_tag,
+                globals_,
+                args.member_overlap_threshold,
+                require_same_seqid,
+                search_indices,
             )
             target_index: int | None = None
             score = 1.0
-            decision = "NEW"
 
             if len(candidates) == 1:
                 target_index = int(candidates[0]["index"])
                 score = float(candidates[0]["score"])
-                decision = "MATCH"
             elif len(candidates) > 1:
                 union_names = set().union(
                     *(globals_[int(candidate["index"])].names for candidate in candidates)
@@ -271,19 +341,14 @@ def command_run(args: argparse.Namespace) -> int:
                     for source_index in ordered_indices[1:]:
                         if not globals_[source_index].active:
                             continue
-                        fusion_rows.append(
-                            {
-                                "sample_id": sample,
-                                "local_tag_id": local_tag.cluster_id,
-                                "target_internal_id": target_index,
-                                "source_internal_id": source_index,
-                                "union_score": round(union_score, 6),
-                            }
+                        merge_global_nodes(
+                            globals_[target_index],
+                            globals_[source_index],
+                            target_index,
+                            name_index,
+                            flank_index,
                         )
-                        merge_global_nodes(globals_[target_index], globals_[source_index])
-                        redirects[source_index] = target_index
                     score = union_score
-                    decision = "FUSION"
                 else:
                     best = sorted(
                         candidates,
@@ -295,7 +360,6 @@ def command_run(args: argparse.Namespace) -> int:
                     )[0]
                     target_index = int(best["index"])
                     score = float(best["score"])
-                    decision = "BEST_MATCH"
 
             if target_index is None:
                 target_index = len(globals_)
@@ -307,22 +371,21 @@ def command_run(args: argparse.Namespace) -> int:
                         members=set(local_tag.members),
                         left_flanks=set(local_tag.left_flanks),
                         right_flanks=set(local_tag.right_flanks),
-                        local_tags=[local_tag],
+                        local_tags=[(local_tag.sample, local_tag.cluster_id)],
                     )
                 )
+                index_values(name_index, local_tag.names, target_index)
+                index_values(flank_index, local_tag.flanks, target_index)
             else:
-                add_local_tag(globals_[target_index], local_tag, score)
-
-            evidence_rows.append(
-                {
-                    "sample_id": sample,
-                    "local_tag_id": local_tag.cluster_id,
-                    "target_internal_id": target_index,
-                    "candidate_count": len(candidates),
-                    "match_score": round(score, 6),
-                    "decision": decision,
-                }
-            )
+                add_local_tag(
+                    globals_[target_index],
+                    local_tag,
+                    score,
+                    target_index,
+                    name_index,
+                    flank_index,
+                )
+        del sample_tags
 
     active = [
         (index, global_tag)
@@ -335,7 +398,7 @@ def command_run(args: argparse.Namespace) -> int:
             item[1].chrom,
             min(
                 (
-                    (local.sample, local.cluster_id)
+                    local
                     for local in item[1].local_tags
                 ),
                 default=("", ""),
@@ -344,170 +407,67 @@ def command_run(args: argparse.Namespace) -> int:
         )
     )
     internal_to_global = {
-        internal: f"MC_{number:04d}"
+        internal: f"Candidate_cluster_{number:04d}"
         for number, (internal, _) in enumerate(active, start=1)
     }
 
-    def resolve_internal(index: int) -> int:
-        seen: set[int] = set()
-        while index in redirects:
-            if index in seen:
-                raise MergeError("Internal fusion redirect cycle detected")
-            seen.add(index)
-            index = redirects[index]
-        return index
-
     tag_rows: list[dict[str, object]] = []
-    member_rows: list[dict[str, object]] = []
     mapping_rows: list[dict[str, object]] = []
     for internal_index, global_tag in active:
         global_id = internal_to_global[internal_index]
         sample_map: dict[str, list[str]] = defaultdict(list)
-        for local in global_tag.local_tags:
-            sample_map[local.sample].append(local.cluster_id)
+        for sample, cluster_id in global_tag.local_tags:
+            sample_map[sample].append(cluster_id)
             mapping_rows.append(
                 {
-                    "global_tag_id": global_id,
-                    "sample_id": local.sample,
-                    "local_tag_id": local.cluster_id,
+                    "candidate_global_tag_id": global_id,
+                    "sample_id": sample,
+                    "local_tag_id": cluster_id,
                 }
             )
-            for member_id in sorted(local.member_ids):
-                member_rows.append(
-                    {
-                        "global_tag_id": global_id,
-                        "sample_id": local.sample,
-                        "local_tag_id": local.cluster_id,
-                        "member_type": "member",
-                        "member_id": member_id,
-                    }
-                )
-            for member_id in sorted(local.pseudo_ids):
-                member_rows.append(
-                    {
-                        "global_tag_id": global_id,
-                        "sample_id": local.sample,
-                        "local_tag_id": local.cluster_id,
-                        "member_type": "pseudogene",
-                        "member_id": member_id,
-                    }
-                )
         tag_rows.append(
             {
-                "global_tag_id": global_id,
+                "candidate_global_tag_id": global_id,
+                "pan_cluster_size": len(global_tag.names),
                 "reference_seqid": global_tag.chrom,
                 "source_sample_id": global_tag.source,
                 "occupancy": len(sample_map),
-                "local_tag_count": len(global_tag.local_tags),
-                "sample_ids": ",".join(sorted(sample_map)),
-                "local_tag_ids": ";".join(
-                    f"{sample}:{','.join(sorted(ids))}"
-                    for sample, ids in sorted(sample_map.items())
-                ),
                 "gene_names": ",".join(sorted(global_tag.names)),
-                "member_ids": ",".join(sorted(global_tag.members)),
-                "member_instance_count": sum(
-                    len(local.member_ids) for local in global_tag.local_tags
-                ),
-                "pseudogene_instance_count": sum(
-                    len(local.pseudo_ids) for local in global_tag.local_tags
-                ),
+                "gene_ids": ",".join(sorted(global_tag.members)),
                 "left_flank_genes": ",".join(sorted(global_tag.left_flanks)),
                 "right_flank_genes": ",".join(sorted(global_tag.right_flanks)),
-                "mean_match_score": round(
-                    global_tag.score_sum / global_tag.match_count, 6
-                ),
-                "min_match_score": round(global_tag.min_score, 6),
             }
         )
-
-    for row in evidence_rows:
-        internal = resolve_internal(int(row.pop("target_internal_id")))
-        row["global_tag_id"] = internal_to_global.get(internal, "")
-    for row in fusion_rows:
-        target = resolve_internal(int(row.pop("target_internal_id")))
-        source = resolve_internal(int(row.pop("source_internal_id")))
-        row["target_global_tag_id"] = internal_to_global.get(target, "")
-        row["source_global_tag_id"] = internal_to_global.get(source, "")
 
     write_tsv(
         args.output_tags,
         [
-            "global_tag_id",
+            "candidate_global_tag_id",
+            "pan_cluster_size",
             "reference_seqid",
             "source_sample_id",
             "occupancy",
-            "local_tag_count",
-            "sample_ids",
-            "local_tag_ids",
             "gene_names",
-            "member_ids",
-            "member_instance_count",
-            "pseudogene_instance_count",
+            "gene_ids",
             "left_flank_genes",
             "right_flank_genes",
-            "mean_match_score",
-            "min_match_score",
         ],
         tag_rows,
     )
     write_tsv(
-        args.output_members,
-        [
-            "global_tag_id",
-            "sample_id",
-            "local_tag_id",
-            "member_type",
-            "member_id",
-        ],
-        sorted(
-            member_rows,
-            key=lambda row: (
-                row["global_tag_id"],
-                row["sample_id"],
-                row["local_tag_id"],
-                row["member_type"],
-                row["member_id"],
-            ),
-        ),
-    )
-    write_tsv(
         args.output_mapping,
-        ["global_tag_id", "sample_id", "local_tag_id"],
+        ["candidate_global_tag_id", "sample_id", "local_tag_id"],
         sorted(
             mapping_rows,
             key=lambda row: (
-                row["global_tag_id"],
+                row["candidate_global_tag_id"],
                 row["sample_id"],
                 row["local_tag_id"],
             ),
         ),
     )
-    write_tsv(
-        args.output_evidence,
-        [
-            "sample_id",
-            "local_tag_id",
-            "candidate_count",
-            "match_score",
-            "decision",
-            "global_tag_id",
-        ],
-        evidence_rows,
-    )
-    write_tsv(
-        args.output_fusions,
-        [
-            "sample_id",
-            "local_tag_id",
-            "union_score",
-            "target_global_tag_id",
-            "source_global_tag_id",
-        ],
-        fusion_rows,
-    )
     print(
-        f"[Pan-TAG] Merged {sum(len(tags) for tags in local_by_sample.values())} "
+        f"[Pan-TAG] Merged {total_local_tags} "
         f"local TAG(s) into {len(active)} global TAG(s)."
     )
     return 0
@@ -518,11 +478,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-sample", required=True)
     parser.add_argument("--local-tags", nargs="+", required=True)
     parser.add_argument("--member-overlap-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--require-same-seqid",
+        action="store_true",
+        help="Only merge local/global TAGs with identical seq_id values.",
+    )
     parser.add_argument("--output-tags", required=True)
-    parser.add_argument("--output-members", required=True)
     parser.add_argument("--output-mapping", required=True)
-    parser.add_argument("--output-evidence", required=True)
-    parser.add_argument("--output-fusions", required=True)
     return parser
 
 

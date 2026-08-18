@@ -8,67 +8,192 @@ pixi run snakemake --snakefile workflow/Snakefile \
 import csv
 import os
 import re
+from pathlib import Path
 
 
-SAMPLES_FILE = config.get("samples", "config/samples.tsv")
-RESULTS = config.get("results_dir", "results")
-LOGS = config.get("logs_dir", "logs")
-WORK = config.get("work_dir", "work")
-PIXI_BIN = os.environ.get("PIXI_BIN", "pixi")
-PIXI_MANIFEST = os.path.abspath("pixi.toml")
+LAUNCH_DIR = Path.cwd().resolve()
+PROJECT_ROOT = Path(workflow.basedir).resolve().parent
+
+
+def run_path(value):
+    """Resolve user paths against the directory where Snakemake was launched."""
+    path = Path(str(value)).expanduser()
+    return str(path.resolve() if path.is_absolute() else (LAUNCH_DIR / path).resolve())
+
+
+def executable(value):
+    """Keep PATH command names, but anchor explicit executable paths."""
+    path = Path(str(value)).expanduser()
+    return str(value) if path.parent == Path(".") else run_path(path)
+
+
+SAMPLES_FILE = run_path(config.get("samples", "config/samples.tsv"))
+RESULTS = run_path(config.get("results_dir", "results"))
+LOGS = run_path(config.get("logs_dir", "logs"))
+WORK = run_path(config.get("work_dir", "work"))
+SOFTWARE_CONFIG = config.get("software", {})
+DIAMOND_BIN = executable(SOFTWARE_CONFIG.get("diamond", "diamond"))
+GFFREAD_BIN = executable(SOFTWARE_CONFIG.get("gffread", "gffread"))
+MCScanX_BUILD_SCRIPT = str(PROJECT_ROOT / "src/pantag/mcscanx/build.sh")
+MCScanX_SOURCE = str(PROJECT_ROOT / "src/pantag/mcscanx/MCScanX-source.tar.gz")
+LIFTOFF_DB_SCRIPT = str(PROJECT_ROOT / "src/pantag/liftoff_db.py")
+
+# Keep Snakemake locks and persistence metadata inside this dataset's work_dir.
+Path(WORK).mkdir(parents=True, exist_ok=True)
+workdir: WORK
 
 
 def load_samples(path):
     with open(path, newline="", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
-    required = {"sample_id", "fasta"}
-    if not rows or not required.issubset(rows[0]):
-        raise ValueError(f"{path} must contain: {sorted(required)}")
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames != ["sample_id", "fasta", "gff"]:
+            raise ValueError(
+                f"{path} must contain exactly, in order: sample_id, fasta, gff"
+            )
+        rows = list(reader)
+    if not rows:
+        raise ValueError(f"{path} must contain a reference sample row")
+    for row in rows:
+        row["fasta"] = run_path(row["fasta"])
+        if (row.get("gff") or "").strip():
+            row["gff"] = run_path(row["gff"])
     samples = {row["sample_id"]: row for row in rows}
     if len(samples) != len(rows):
         raise ValueError("sample_id values must be unique")
     return samples
 
 
-TARGETS = load_samples(SAMPLES_FILE)
 REFERENCE = config["reference"]["sample_id"]
-if REFERENCE in TARGETS:
-    raise ValueError("Reference sample must not be repeated in samples.tsv")
+TARGETS = load_samples(SAMPLES_FILE)
+FIRST_SAMPLE = next(iter(TARGETS))
+if FIRST_SAMPLE != REFERENCE:
+    raise ValueError(
+        "The first samples.tsv row must be the reference sample recorded in config.yaml"
+    )
+TARGETS.pop(REFERENCE)
 
 ALL_SAMPLES = [REFERENCE] + sorted(TARGETS)
-TARGET_PATTERN = "|".join(re.escape(sample) for sample in TARGETS)
+REFERENCE_FASTA = run_path(config["reference"]["fasta"])
+REFERENCE_GFF = run_path(config["reference"]["gff"])
+SAMPLE_ORDER = [REFERENCE] + list(TARGETS)
+FASTA_FILES = [
+    REFERENCE_FASTA if sample == REFERENCE else TARGETS[sample]["fasta"]
+    for sample in SAMPLE_ORDER
+]
+FASTA_INDEXES = [
+    f"{WORK}/fasta_indexes/"
+    f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', sample)}.fai"
+    for sample in SAMPLE_ORDER
+]
+ANNOTATION_MODE = str(config.get("annotation", {}).get("mode", "liftoff")).lower()
+if ANNOTATION_MODE not in {"liftoff", "provided"}:
+    raise ValueError("annotation.mode must be 'liftoff' or 'provided'")
+for sample, row in TARGETS.items():
+    provided_gff = (row.get("gff") or "").strip()
+    if ANNOTATION_MODE == "liftoff" and provided_gff:
+        raise ValueError(f"{sample}: gff must be empty in liftoff mode")
+    if ANNOTATION_MODE == "provided" and not provided_gff:
+        raise ValueError(f"{sample}: gff is required in provided mode")
+LIFTOFF_SAMPLES = sorted(TARGETS) if ANNOTATION_MODE == "liftoff" else []
+LIFTOFF_PATTERN = (
+    "|".join(re.escape(sample) for sample in LIFTOFF_SAMPLES) or r"(?!)"
+)
+LIFTOFF_CONFIG = config.get("liftoff", {})
+LIFTOFF_ENVIRONMENT = str(LIFTOFF_CONFIG.get("pixi_environment", "liftoff"))
+_liftoff_executable = Path(str(LIFTOFF_CONFIG.get("executable", "liftoff"))).expanduser()
+LIFTOFF_BIN = (
+    str(_liftoff_executable.resolve())
+    if _liftoff_executable.parent != Path(".")
+    else str(PROJECT_ROOT / ".pixi/envs" / LIFTOFF_ENVIRONMENT / "bin" / _liftoff_executable)
+)
+LIFTOFF_PYTHON = str(
+    PROJECT_ROOT / ".pixi/envs" / LIFTOFF_ENVIRONMENT / "bin/python"
+)
+LIFTOFF_REFERENCE_DB = f"{WORK}/liftoff/reference_annotation.db"
+LIFTOFF_FEATURE_TYPES = (
+    run_path(LIFTOFF_CONFIG["feature_types"])
+    if LIFTOFF_CONFIG.get("feature_types")
+    else "LIFTOFF_NOT_CONFIGURED"
+)
+if LIFTOFF_SAMPLES:
+    missing_liftoff = [
+        key
+        for key in ("feature_types",)
+        if not LIFTOFF_CONFIG.get(key)
+    ]
+    if missing_liftoff:
+        raise ValueError(
+            "Samples without GFF require liftoff config values: "
+            + ", ".join(missing_liftoff)
+        )
 MCScanX_BIN = f"{WORK}/software/MCScanX_pantag"
 MCScanX_BUILD_INFO = f"{WORK}/software/MCScanX_pantag.build_info.txt"
+DOWNSTREAM = f"{RESULTS}/downstream"
+DOWNSTREAM_CONFIG = config.get("downstream", {})
+REFINE_CONFIG = config.get("refine", {})
+REFINE_FLANK_THRESHOLD = float(REFINE_CONFIG.get("flank_overlap_threshold", 0.20))
+if not 0 <= REFINE_FLANK_THRESHOLD <= 1:
+    raise ValueError("refine.flank_overlap_threshold must be between 0 and 1")
+CLUSTER_CONFIG = DOWNSTREAM_CONFIG.get("cluster", {})
+PSEUDOGENE_CONFIG = config.get("pseudogene", {})
+if "enabled" not in PSEUDOGENE_CONFIG:
+    raise ValueError(
+        "pseudogene.enabled is required; generate config with "
+        "--pseudogene-enabled or --no-pseudogene-enabled"
+    )
+PSEUDOGENE_ENABLED = bool(PSEUDOGENE_CONFIG["enabled"])
+FLANK_CONFIG = config.get("flanks", {})
+OUTPUT_CONFIG = config.get("outputs", {})
+DEBUG_OUTPUTS = bool(OUTPUT_CONFIG.get("debug", False))
+LOCAL_TO_GLOBAL = (
+    f"{RESULTS}/global/local_to_global.tsv"
+    if DEBUG_OUTPUTS else f"{WORK}/global/local_to_global.tsv"
+)
+CORE_TARGETS = [
+    f"{RESULTS}/global/pangenome_TAGs.tsv",
+    f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
+]
+if DEBUG_OUTPUTS:
+    CORE_TARGETS.append(LOCAL_TO_GLOBAL)
 
 
 def sample_fasta(wildcards):
     if wildcards.sample == REFERENCE:
-        return config["reference"]["fasta"]
+        return REFERENCE_FASTA
     return TARGETS[wildcards.sample]["fasta"]
 
 
 def sample_gff(wildcards):
     if wildcards.sample == REFERENCE:
-        return config["reference"]["gff"]
+        return REFERENCE_GFF
+    if ANNOTATION_MODE == "provided":
+        return (TARGETS[wildcards.sample].get("gff") or "").strip()
     return f"{RESULTS}/liftoff/{wildcards.sample}/{wildcards.sample}.liftoff.gff3"
+
+
+def target_gff(sample):
+    if ANNOTATION_MODE == "provided":
+        return (TARGETS[sample].get("gff") or "").strip()
+    return f"{RESULTS}/liftoff/{sample}/{sample}.liftoff.gff3"
 
 
 rule all:
     input:
-        f"{RESULTS}/global/pangenome_TAGs.tsv",
-        f"{RESULTS}/global/pangenome_TAG_members.tsv",
-        f"{RESULTS}/global/local_to_global.tsv",
-        f"{RESULTS}/global/reconciliation_evidence.tsv",
-        f"{RESULTS}/global/fusion_events.tsv",
+        CORE_TARGETS,
 
 
 rule validate_inputs:
     input:
         config=lambda wc: workflow.configfiles[0],
         samples=SAMPLES_FILE,
-        reference_fasta=config["reference"]["fasta"],
-        reference_gff=config["reference"]["gff"],
+        reference_fasta=REFERENCE_FASTA,
+        reference_gff=REFERENCE_GFF,
         target_fastas=[TARGETS[sample]["fasta"] for sample in sorted(TARGETS)],
+        provided_target_gffs=[
+            (TARGETS[sample].get("gff") or "").strip()
+            for sample in sorted(TARGETS)
+            if ANNOTATION_MODE == "provided"
+        ],
     output:
         f"{RESULTS}/input_validation.json",
     log:
@@ -87,8 +212,8 @@ rule validate_inputs:
 rule build_mcscanx_pantag:
     input:
         validated=f"{RESULTS}/input_validation.json",
-        script="src/pantag/mcscanx/build.sh",
-        source="src/pantag/mcscanx/MCScanX-source.tar.gz",
+        script=MCScanX_BUILD_SCRIPT,
+        source=MCScanX_SOURCE,
     output:
         binary=MCScanX_BIN,
         build_info=MCScanX_BUILD_INFO,
@@ -97,9 +222,34 @@ rule build_mcscanx_pantag:
     shell:
         """
         mkdir -p $(dirname {log})
-        bash {input.script} > {log} 2>&1
+        bash {input.script:q} {output.binary:q} {output.build_info:q} > {log:q} 2>&1
         test -x {output.binary}
         test -s {output.build_info}
+        """
+
+
+rule build_liftoff_db:
+    input:
+        validated=f"{RESULTS}/input_validation.json",
+        reference_gff=REFERENCE_GFF,
+        script=LIFTOFF_DB_SCRIPT,
+    output:
+        db=LIFTOFF_REFERENCE_DB,
+    params:
+        python=LIFTOFF_PYTHON,
+    log:
+        f"{LOGS}/liftoff/build_reference_db.log",
+    shell:
+        """
+        mkdir -p $(dirname {output.db}) $(dirname {log})
+        test -x {params.python:q} || {{
+          echo "Liftoff environment is not installed: {params.python}" >&2
+          exit 1
+        }}
+        {params.python:q} {input.script:q} \
+          --gff {input.reference_gff:q} \
+          --output {output.db:q} \
+          > {log:q} 2>&1
         """
 
 
@@ -107,38 +257,38 @@ rule liftoff:
     input:
         validated=f"{RESULTS}/input_validation.json",
         target_fasta=lambda wc: TARGETS[wc.sample]["fasta"],
-        reference_fasta=config["liftoff"]["reference_fasta"],
-        reference_db=config["liftoff"]["reference_db"],
-        feature_types=config["liftoff"]["feature_types"],
+        reference_fasta=REFERENCE_FASTA,
+        reference_db=LIFTOFF_REFERENCE_DB,
+        feature_types=LIFTOFF_FEATURE_TYPES,
     output:
         gff=f"{RESULTS}/liftoff/{{sample}}/{{sample}}.liftoff.gff3",
     params:
         intermediate=f"{WORK}/liftoff/{{sample}}/intermediate_files_{{sample}}",
-        pixi_environment=config.get("liftoff", {}).get(
-            "pixi_environment", "liftoff"
-        ),
+        executable=LIFTOFF_BIN,
     threads:
-        config.get("liftoff", {}).get("threads", 8)
+        LIFTOFF_CONFIG.get("threads", 8)
     resources:
         mem_mb=config.get("resources", {}).get("liftoff_mem_mb", 48000),
         runtime=config.get("resources", {}).get("liftoff_runtime_min", 1440),
     log:
         f"{LOGS}/liftoff/{{sample}}.log",
     wildcard_constraints:
-        sample=TARGET_PATTERN,
+        sample=LIFTOFF_PATTERN,
     shell:
         """
         mkdir -p $(dirname {output.gff}) {params.intermediate} $(dirname {log})
-        {PIXI_BIN} run \
-          --manifest-path {PIXI_MANIFEST} \
-          --environment {params.pixi_environment} \
-          liftoff {input.target_fasta} {input.reference_fasta} \
-          -db {input.reference_db} \
-          -o {output.gff} \
-          -dir {params.intermediate} \
+        test -x {params.executable:q} || {{
+          echo "Liftoff environment is not installed: {params.executable}" >&2
+          echo "Run 'pixi install --environment {LIFTOFF_ENVIRONMENT}' in {PROJECT_ROOT} on a login node." >&2
+          exit 1
+        }}
+        {params.executable:q} {input.target_fasta:q} {input.reference_fasta:q} \
+          -db {input.reference_db:q} \
+          -o {output.gff:q} \
+          -dir {params.intermediate:q} \
           -exclude_partial \
           -p {threads} \
-          -f {input.feature_types} \
+          -f {input.feature_types:q} \
           -copies \
           -sc 0.95 \
           > {log} 2>&1
@@ -153,15 +303,18 @@ rule gffread_proteins:
         f"{WORK}/{{sample}}/{{sample}}_raw_protein.faa",
     log:
         f"{LOGS}/gffread/{{sample}}.log",
+    params:
+        executable=GFFREAD_BIN,
     shell:
         """
         mkdir -p $(dirname {output}) $(dirname {log})
-        gffread {input.gff} -g {input.fasta} -y {output} > {log} 2>&1
+        {params.executable} {input.gff} -g {input.fasta} -y {output} > {log} 2>&1
         """
 
 
 rule prepare_tag_inputs:
     input:
+        config=lambda wc: workflow.configfiles[0],
         gff=sample_gff,
         raw_proteins=f"{WORK}/{{sample}}/{{sample}}_raw_protein.faa",
     output:
@@ -176,6 +329,7 @@ rule prepare_tag_inputs:
         mkdir -p $(dirname {log})
         python -m pantag.prepare tag-inputs \
           --sample-id {wildcards.sample} \
+          --config {input.config} \
           --annotation-gff {input.gff} \
           --raw-proteins {input.raw_proteins} \
           --output-mcscanx-gff {output.mcscanx_gff} \
@@ -188,19 +342,32 @@ rule prepare_tag_inputs:
 
 rule single_sample_tag:
     input:
+        config=lambda wc: workflow.configfiles[0],
         mcscanx_bin=MCScanX_BIN,
         mcscanx_gff=f"{WORK}/{{sample}}/{{sample}}.gff",
         gene_map=f"{WORK}/{{sample}}/{{sample}}.map",
         proteins=f"{WORK}/{{sample}}/{{sample}}_renamed_protein.faa",
+        gff=sample_gff,
+        fasta=sample_fasta,
     output:
         blast_raw=temp(f"{WORK}/{{sample}}/{{sample}}.blast.raw"),
         blast=f"{WORK}/{{sample}}/{{sample}}.blast",
         tandem=f"{WORK}/{{sample}}/{{sample}}.tandem",
-        cluster=f"{RESULTS}/local_tags/{{sample}}/{{sample}}_gene.cluster",
+        cluster=f"{WORK}/{{sample}}/{{sample}}_gene.cluster",
+        final=(
+            f"{WORK}/{{sample}}/{{sample}}_coding_TAGs.tsv"
+            if PSEUDOGENE_ENABLED
+            else f"{RESULTS}/local_tags/{{sample}}_TAGs.tsv"
+        ),
     params:
         workdir=lambda wc: f"{WORK}/{wc.sample}",
         identity=config.get("tag", {}).get("blastp_identity", 20),
-        coverage=config.get("tag", {}).get("blastp_query_coverage", 20),
+        query_coverage=config.get("tag", {}).get("blastp_query_coverage", 20),
+        subject_coverage=config.get("tag", {}).get("blastp_subject_coverage", 20),
+        family_strategy=config.get("tag", {}).get("family_merge_strategy", "none"),
+        family_regex=config.get("tag", {}).get("family_merge_regex", ""),
+        diamond=DIAMOND_BIN,
+        flank_genes=FLANK_CONFIG.get("gene_count", 10),
     threads:
         config.get("tag", {}).get("diamond_threads", 4)
     resources:
@@ -219,8 +386,17 @@ rule single_sample_tag:
           --gene-map {input.gene_map} \
           --proteins {input.proteins} \
           --threads {threads} \
+          --diamond-bin {params.diamond} \
+          --config {input.config} \
+          --gff {input.gff} \
+          --fasta {input.fasta} \
+          --flank-gene-count {params.flank_genes} \
+          --output-final {output.final} \
           --min-identity {params.identity} \
-          --min-query-coverage {params.coverage} \
+          --min-query-coverage {params.query_coverage} \
+          --min-subject-coverage {params.subject_coverage} \
+          --family-merge-strategy {params.family_strategy} \
+          --family-merge-regex '{params.family_regex}' \
           --output-blast-raw {output.blast_raw} \
           --output-blast {output.blast} \
           --output-tandem {output.tandem} \
@@ -231,18 +407,25 @@ rule single_sample_tag:
 
 rule retrieve_pseudogenes:
     input:
-        cluster=f"{RESULTS}/local_tags/{{sample}}/{{sample}}_gene.cluster",
+        config=lambda wc: workflow.configfiles[0],
+        cluster=f"{WORK}/{{sample}}/{{sample}}_gene.cluster",
         proteins=f"{WORK}/{{sample}}/{{sample}}_renamed_protein.faa",
         gff=sample_gff,
         fasta=sample_fasta,
     output:
-        final=f"{RESULTS}/local_tags/{{sample}}/{{sample}}_with_10_flanking_cleaned.txt",
+        final=(
+            f"{RESULTS}/local_tags/{{sample}}_TAGs.tsv"
+            if PSEUDOGENE_ENABLED
+            else f"{WORK}/{{sample}}/{{sample}}_unused_pseudogene_TAGs.tsv"
+        ),
     params:
         workdir=lambda wc: f"{WORK}/{wc.sample}/pseudogenes",
-        flank_bp=config.get("tag", {}).get("pseudogene_flank_bp", 50000),
-        flank_genes=config.get("tag", {}).get("flank_gene_count", 10),
-        identity=config.get("tag", {}).get("blastx_identity", 20),
-        coverage=config.get("tag", {}).get("blastx_query_coverage", 20),
+        flank_bp=PSEUDOGENE_CONFIG.get("search_flank_bp", 50000),
+        flank_genes=FLANK_CONFIG.get("gene_count", 10),
+        identity=PSEUDOGENE_CONFIG.get("blastx_identity", 20),
+        query_coverage=PSEUDOGENE_CONFIG.get("blastx_query_coverage", 20),
+        subject_coverage=PSEUDOGENE_CONFIG.get("blastx_subject_coverage", 20),
+        diamond=DIAMOND_BIN,
     threads:
         config.get("tag", {}).get("diamond_threads", 4)
     resources:
@@ -255,16 +438,19 @@ rule retrieve_pseudogenes:
         mkdir -p {params.workdir} $(dirname {output.final}) $(dirname {log})
         python -m pantag.retrieve_pseudogenes \
           --sample-id {wildcards.sample} \
+          --config {input.config} \
           --cluster {input.cluster} \
           --proteins {input.proteins} \
           --gff {input.gff} \
           --fasta {input.fasta} \
           --workdir {params.workdir} \
           --threads {threads} \
+          --diamond-bin {params.diamond} \
           --flank-bp {params.flank_bp} \
           --flank-gene-count {params.flank_genes} \
           --min-identity {params.identity} \
-          --min-query-coverage {params.coverage} \
+          --min-query-coverage {params.query_coverage} \
+          --min-subject-coverage {params.subject_coverage} \
           --output {output.final} \
           > {log} 2>&1
         """
@@ -273,18 +459,20 @@ rule retrieve_pseudogenes:
 rule merge:
     input:
         local_tags=expand(
-            f"{RESULTS}/local_tags/{{sample}}/{{sample}}_with_10_flanking_cleaned.txt",
+            f"{RESULTS}/local_tags/{{sample}}_TAGs.tsv",
             sample=ALL_SAMPLES,
         ),
     output:
-        tags=f"{RESULTS}/global/pangenome_TAGs.tsv",
-        members=f"{RESULTS}/global/pangenome_TAG_members.tsv",
-        mapping=f"{RESULTS}/global/local_to_global.tsv",
-        evidence=f"{RESULTS}/global/reconciliation_evidence.tsv",
-        fusions=f"{RESULTS}/global/fusion_events.tsv",
+        tags=f"{WORK}/global/pangenome_TAGs.unrefined.tsv",
+        mapping=LOCAL_TO_GLOBAL,
     params:
         reference=REFERENCE,
         threshold=config.get("merge", {}).get("member_overlap_threshold", 0.1),
+        same_seqid_arg=(
+            "--require-same-seqid"
+            if config.get("merge", {}).get("require_same_seqid", False)
+            else ""
+        ),
     resources:
         mem_mb=config.get("resources", {}).get("merge_mem_mb", 32000),
         runtime=config.get("resources", {}).get("merge_runtime_min", 480),
@@ -297,10 +485,210 @@ rule merge:
           --reference-sample {params.reference} \
           --local-tags {input.local_tags} \
           --member-overlap-threshold {params.threshold} \
+          {params.same_seqid_arg} \
           --output-tags {output.tags} \
-          --output-members {output.members} \
           --output-mapping {output.mapping} \
-          --output-evidence {output.evidence} \
-          --output-fusions {output.fusions} \
           > {log} 2>&1
         """
+
+
+rule fasta_indexes:
+    input:
+        FASTA_FILES,
+    output:
+        FASTA_INDEXES,
+    resources:
+        mem_mb=config.get("resources", {}).get("fasta_index_mem_mb", 4000),
+        runtime=config.get("resources", {}).get("fasta_index_runtime_min", 120),
+    log:
+        f"{LOGS}/fasta_index.log",
+    shell:
+        """
+        mkdir -p $(dirname {log}) $(dirname {output[0]})
+        python -m pantag.fasta \
+          --fasta {input:q} \
+          --index {output:q} \
+          > {log} 2>&1
+        """
+
+
+rule refine:
+    input:
+        config=lambda wc: workflow.configfiles[0],
+        tags=f"{WORK}/global/pangenome_TAGs.unrefined.tsv",
+        samples=SAMPLES_FILE,
+        reference_fasta=REFERENCE_FASTA,
+        reference_gff=REFERENCE_GFF,
+        target_fastas=[TARGETS[sample]["fasta"] for sample in TARGETS],
+        fasta_indexes=FASTA_INDEXES,
+        target_gffs=[target_gff(sample) for sample in TARGETS],
+    output:
+        tags=f"{RESULTS}/global/pangenome_TAGs.tsv",
+        matrix=f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
+        manifest=f"{DOWNSTREAM}/TAG_sequence_manifest.tsv",
+        id_map=f"{WORK}/global/refined_cluster_id_map.tsv",
+        span_audit=f"{WORK}/global/span_removed_clusters.tsv",
+    params:
+        target_gff_dir=f"{RESULTS}/liftoff",
+        workdir=f"{WORK}/refine",
+        flank_gene_count=FLANK_CONFIG.get("gene_count", 10),
+        flank_overlap_threshold=REFINE_FLANK_THRESHOLD,
+    threads:
+        REFINE_CONFIG.get("threads", 4)
+    resources:
+        mem_mb=config.get("resources", {}).get("refine_mem_mb", 32000),
+        runtime=config.get("resources", {}).get("refine_runtime_min", 480),
+    log:
+        f"{LOGS}/refine.log",
+    shell:
+        """
+        mkdir -p $(dirname {output.matrix}) $(dirname {log})
+        python -m pantag.refine \
+          --tags {input.tags} \
+          --config {input.config} \
+          --samples {input.samples} \
+          --reference-sample {REFERENCE} \
+          --reference-fasta {input.reference_fasta} \
+          --reference-gff {input.reference_gff} \
+          --fasta-indexes {input.fasta_indexes:q} \
+          --target-gff-dir {params.target_gff_dir} \
+          --flank-gene-count {params.flank_gene_count} \
+          --flank-overlap-threshold {params.flank_overlap_threshold} \
+          --threads {threads} \
+          --workdir {params.workdir} \
+          --output-tags {output.tags} \
+          --output-matrix {output.matrix} \
+          --output-manifest {output.manifest} \
+          --output-id-map {output.id_map} \
+          --output-span-audit {output.span_audit} \
+          > {log} 2>&1
+        """
+
+
+checkpoint downstream_extract:
+    input:
+        manifest=f"{DOWNSTREAM}/TAG_sequence_manifest.tsv",
+        matrix=f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
+        samples=SAMPLES_FILE,
+        reference_fasta=REFERENCE_FASTA,
+        target_fastas=[TARGETS[sample]["fasta"] for sample in TARGETS],
+    output:
+        fastas=directory(f"{DOWNSTREAM}/sequences/per_TAG"),
+        records=f"{DOWNSTREAM}/sequences/sequence_records.tsv",
+    resources:
+        mem_mb=config.get("resources", {}).get("downstream_extract_mem_mb", 16000),
+        runtime=config.get("resources", {}).get("downstream_extract_runtime_min", 240),
+    log:
+        f"{LOGS}/downstream/extract.log",
+    shell:
+        """
+        mkdir -p $(dirname {output.records}) $(dirname {log})
+        python -m pantag.downstream.extract \
+          --manifest {input.manifest} \
+          --matrix {input.matrix} \
+          --samples {input.samples} \
+          --reference-sample {REFERENCE} \
+          --reference-fasta {input.reference_fasta} \
+          --output-dir {output.fastas} \
+          --output-records {output.records} \
+          > {log} 2>&1
+        """
+
+
+rule downstream_sequences:
+    input:
+        f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
+        f"{DOWNSTREAM}/TAG_sequence_manifest.tsv",
+        f"{DOWNSTREAM}/sequences/per_TAG",
+        f"{DOWNSTREAM}/sequences/sequence_records.tsv",
+
+
+def downstream_tag_ids(wildcards):
+    extraction = checkpoints.downstream_extract.get()
+    pattern = os.path.join(str(extraction.output.fastas), "{global_tag}.fa")
+    return sorted(glob_wildcards(pattern).global_tag)
+
+
+def downstream_cluster_summaries(wildcards):
+    return expand(
+        f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/summary.tsv",
+        global_tag=downstream_tag_ids(wildcards),
+    )
+
+
+rule downstream_cluster_tag:
+    input:
+        fasta=f"{DOWNSTREAM}/sequences/per_TAG/{{global_tag}}.fa",
+        records=f"{DOWNSTREAM}/sequences/sequence_records.tsv",
+    output:
+        assignments=f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/assignments.tsv",
+        cross_table=f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/cluster_gene_sample_counts.tsv",
+        summary=f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/summary.tsv",
+    params:
+        k=CLUSTER_CONFIG.get("k", 31),
+        ubiquitous=CLUSTER_CONFIG.get("ubiquitous_threshold", 0.95),
+        max_clusters=CLUSTER_CONFIG.get("max_clusters", 0),
+        min_sequences=CLUSTER_CONFIG.get("min_sequences", 3),
+        seed=CLUSTER_CONFIG.get("seed", 1),
+        jitter=CLUSTER_CONFIG.get("pcoa_jitter_frac", 0.006),
+        point_size=CLUSTER_CONFIG.get("pcoa_point_size", 4.0),
+        alpha=CLUSTER_CONFIG.get("pcoa_alpha", 0.25),
+        pcoa_arg=lambda wc: (
+            f"--pcoa {DOWNSTREAM}/clusters/per_TAG/{wc.global_tag}/pcoa.pdf"
+            if CLUSTER_CONFIG.get("pcoa", True) else ""
+        ),
+    resources:
+        mem_mb=config.get("resources", {}).get("downstream_cluster_mem_mb", 16000),
+        runtime=config.get("resources", {}).get("downstream_cluster_runtime_min", 240),
+    log:
+        f"{LOGS}/downstream/cluster/{{global_tag}}.log",
+    wildcard_constraints:
+        global_tag="[A-Za-z0-9_.-]+",
+    shell:
+        """
+        mkdir -p $(dirname {output.summary}) $(dirname {log})
+        python -m pantag.downstream.cluster run \
+          --global-tag-id {wildcards.global_tag} \
+          --fasta {input.fasta} \
+          --records {input.records} \
+          --assignments {output.assignments} \
+          --cross-table {output.cross_table} \
+          --summary {output.summary} \
+          {params.pcoa_arg} \
+          --k {params.k} \
+          --ubiquitous-threshold {params.ubiquitous} \
+          --max-clusters {params.max_clusters} \
+          --min-sequences {params.min_sequences} \
+          --seed {params.seed} \
+          --pcoa-jitter-frac {params.jitter} \
+          --pcoa-point-size {params.point_size} \
+          --pcoa-alpha {params.alpha} \
+          > {log} 2>&1
+        """
+
+
+rule downstream_cluster_summary:
+    input:
+        downstream_cluster_summaries,
+    output:
+        f"{DOWNSTREAM}/clusters/global_cluster_summary.tsv",
+    log:
+        f"{LOGS}/downstream/cluster_summary.log",
+    shell:
+        """
+        mkdir -p $(dirname {output}) $(dirname {log})
+        python -m pantag.downstream.cluster merge \
+          --inputs {input} \
+          --output {output} \
+          > {log} 2>&1
+        """
+
+
+rule downstream_cluster:
+    input:
+        f"{DOWNSTREAM}/clusters/global_cluster_summary.tsv",
+
+
+rule downstream_all:
+    input:
+        f"{DOWNSTREAM}/clusters/global_cluster_summary.tsv",

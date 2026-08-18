@@ -8,26 +8,60 @@ results_dir: "tests/results"
 logs_dir: "tests/logs"
 work_dir: "tests/work"
 
+software:
+  diamond: "diamond"
+  gffread: "gffread"
+
+annotation:
+  mode: liftoff
+  gene_feature_types: [gene]
+  pseudogene_feature_types: [gene, pseudogene]
+  transcript_feature_types: [mRNA, transcript]
+  gene_id_keys: [gene_id, ID]
+  gene_name_keys: [gene_name, Name]
+  transcript_id_keys: [transcript_id, ID]
+  transcript_parent_gene_keys: [gene_id, Parent]
+  biotype_keys: [gene_type, gene_biotype, biotype]
+  coding_filter_mode: auto
+  coding_values: [protein_coding]
+  excluded_attribute_terms: [readthrough_gene, readthrough]
+  pseudogene_values: [pseudogene, processed_pseudogene, unprocessed_pseudogene]
+  fallback_gene_name_to_id: true
+
 liftoff:
-  reference_fasta: "tests/data/reference.fa"
-  reference_db: "tests/data/reference.gff3_db"
   feature_types: "config/liftoff_features.txt"
   pixi_environment: "liftoff"
+  executable: "liftoff"
   threads: 4
 
 tag:
   diamond_threads: 2
   blastp_identity: 20
   blastp_query_coverage: 20
+  blastp_subject_coverage: 20
+  family_merge_strategy: none
+
+pseudogene:
+  enabled: true
+  search_flank_bp: 50000
   blastx_identity: 20
   blastx_query_coverage: 20
-  pseudogene_flank_bp: 50000
-  flank_gene_count: 10
+  blastx_subject_coverage: 20
+
+flanks:
+  gene_count: 10
 
 merge:
   member_overlap_threshold: 0.1
+  require_same_seqid: false
+
+refine:
+  threads: 2
+  flank_overlap_threshold: 0.20
 
 resources:
+  fasta_index_mem_mb: 2000
+  fasta_index_runtime_min: 30
   liftoff_mem_mb: 16000
   liftoff_runtime_min: 120
   single_sample_mem_mb: 8000
@@ -36,3 +70,5 @@ resources:
   pseudogene_runtime_min: 60
   merge_mem_mb: 8000
   merge_runtime_min: 60
+  refine_mem_mb: 8000
+  refine_runtime_min: 60

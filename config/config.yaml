@@ -1,38 +1,110 @@
 reference:
   sample_id: chm13
-  fasta: "/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/chm13.fa"
-  gff: "/share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/gff/chm13.gff"
-
-samples: "config/samples.tsv"
-results_dir: "results"
-logs_dir: "logs"
-work_dir: "work"
-
+  fasta: /share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/fasta/chm13.fa
+  gff: /share/home/zhanglab/user/jinrong/tandem_analysis/raw_data/gff/chm13.gff
+samples: /share/home/zhanglab/user/jinrong/tandem_analysis/cluster_after_iteration/Pan_TAG_v0.1/config/samples.tsv
+results_dir: results
+logs_dir: logs
+work_dir: work
+software:
+  diamond: diamond
+  gffread: gffread
+annotation:
+  mode: provided
+  gene_feature_types:
+  - gene
+  pseudogene_feature_types:
+  - gene
+  - pseudogene
+  transcript_feature_types:
+  - mRNA
+  - transcript
+  gene_id_keys:
+  - gene_id
+  - ID
+  gene_name_keys:
+  - gene_name
+  - Name
+  - gene_symbol
+  - gene
+  - geneName
+  transcript_id_keys:
+  - transcript_id
+  - ID
+  transcript_parent_gene_keys:
+  - gene_id
+  - Parent
+  biotype_keys:
+  - gene_type
+  - gene_biotype
+  - biotype
+  coding_filter_mode: auto
+  coding_values:
+  - protein_coding
+  excluded_attribute_terms:
+  - readthrough_gene
+  - readthrough
+  pseudogene_values:
+  - pseudogene
+  - processed_pseudogene
+  - unprocessed_pseudogene
+  strip_id_prefixes:
+  - 'gene:'
+  - 'transcript:'
+  fallback_gene_name_to_id: true
 liftoff:
-  reference_fasta: "/share/home/zhanglab/user/chenquanyu/rawdata/GRCh38/ref/GRCh38.p14.genome.fa"
-  reference_db: "/share/home/zhanglab/user/chenquanyu/rawdata/GRCh38/ref/gencode.v47.chr_patch_hapl_scaff.annotation.gff3_db"
-  feature_types: "config/liftoff_features.txt"
-  pixi_environment: "liftoff"
+  feature_types: config/liftoff_features.txt
+  pixi_environment: liftoff
+  executable: liftoff
   threads: 8
-
 tag:
   diamond_threads: 4
   blastp_identity: 20
   blastp_query_coverage: 20
+  blastp_subject_coverage: 20
+  family_merge_strategy: first_digit_prefix
+  family_merge_regex: ''
+pseudogene:
+  enabled: true
+  search_flank_bp: 50000
   blastx_identity: 20
   blastx_query_coverage: 20
-  pseudogene_flank_bp: 50000
-  flank_gene_count: 10
-
+  blastx_subject_coverage: 20
+flanks:
+  gene_count: 10
 merge:
-  member_overlap_threshold: 0.1
-
+  member_overlap_threshold: 0.2
+  require_same_seqid: false
+outputs:
+  debug: false
+refine:
+  threads: 12
+  flank_overlap_threshold: 0.2
+downstream:
+  cluster:
+    k: 31
+    ubiquitous_threshold: 0.95
+    max_clusters: 0
+    min_sequences: 10
+    pcoa: true
+    seed: 1
+    pcoa_jitter_frac: 0.006
+    pcoa_point_size: 12
+    pcoa_alpha: 0.6
 resources:
-  liftoff_mem_mb: 48000
+  fasta_index_mem_mb: 4000
+  fasta_index_runtime_min: 120
+  liftoff_mem_mb: 8000
   liftoff_runtime_min: 1440
-  single_sample_mem_mb: 16000
+  single_sample_mem_mb: 8000
   single_sample_runtime_min: 240
-  pseudogene_mem_mb: 16000
+  pseudogene_mem_mb: 8000
   pseudogene_runtime_min: 240
-  merge_mem_mb: 32000
+  merge_mem_mb: 8000
   merge_runtime_min: 480
+  refine_mem_mb: 8000
+  refine_runtime_min: 480
+  downstream_extract_mem_mb: 16000
+  downstream_extract_runtime_min: 240
+  downstream_cluster_mem_mb: 16000
+  downstream_cluster_runtime_min: 240

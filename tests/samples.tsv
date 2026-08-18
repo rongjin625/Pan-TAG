@@ -1,3 +1,4 @@
-sample_id	fasta
-mini_sample01	tests/data/assemblies/mini_sample01.fa
-mini_sample02	tests/data/assemblies/mini_sample02.fa
+sample_id	fasta	gff
+mini_reference	tests/data/reference.fa	tests/data/reference.gff3
+mini_sample01	tests/data/assemblies/mini_sample01.fa	""
+mini_sample02	tests/data/assemblies/mini_sample02.fa	""
