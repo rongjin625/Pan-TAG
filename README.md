@@ -10,7 +10,7 @@ results/global/pangenome_TAGs.tsv
 results/global/refined_TAG_count_matrix.tsv
 ```
 
-核心 refine 会在所有样本重新定位候选簇；任何样本出现跨多个 seqid 的 `span` 时删除整个候选簇，并将统计信息直接合并进计数矩阵。可选下游继续生成逐 Pan-cluster FASTA 及簇内 k-mer 聚类。当前 v0.1 已在人类 GENCODE/Liftoff 注释体系上完成实际数据测试，并提供可配置的 GFF 属性解析；这不代表已经对所有物种和注释来源完成 benchmark。
+核心 refine 会在所有样本重新定位候选簇；仅当出现跨多个 seqid 的 `span` 样本比例严格大于 0.9 时删除整个候选簇，并将统计信息直接合并进计数矩阵。可选下游继续生成逐 Pan-cluster FASTA 及簇内 k-mer 聚类。当前 v0.1 已在人类 GENCODE/Liftoff 注释体系上完成实际数据测试，并提供可配置的 GFF 属性解析；这不代表已经对所有物种和注释来源完成 benchmark。
 
 ## 工作流程
 
@@ -303,6 +303,8 @@ find logs -maxdepth 2 -type f -print
 
 默认模板为 `config/config.yaml`。`pantag configure` 只负责读取样本表、合并配置并写出 YAML；它不会执行 Snakemake。
 
+`config/config.yaml` 是所有用户可调运行参数的唯一来源。Snakefile 只读取并传递这些值，执行模块不再为同一参数设置第二套默认值；缺少必需配置项时流程会直接报错，不会静默采用代码内置值。通常应通过 `pixi run pantag configure ...` 基于项目的完整模板生成配置，而不是直接调用各 Python 执行模块。
+
 - `--template <FILE>`：选择一个现有 YAML 作为模板；默认 `config/config.yaml`。
 - `--output-config <FILE>`：写出最终配置；等价别名为 `--output`，默认 `config/config.yaml`。
 - 未在 CLI 显式提供的可选值保留所选模板中的值。
@@ -359,11 +361,11 @@ pixi run pantag -h
 | `--blastx-query-coverage` | `20` | blastx 最低 query coverage 百分比 |
 | `--blastx-subject-coverage` | `20` | blastx 最低 subject coverage 百分比 |
 | `--flank-gene-count` | `10` | TAG 每侧用于 QC/共线性的基因数 |
-| `--member-overlap-threshold` | `0.1` | local/global TAG 成员重叠阈值 |
+| `--member-overlap-threshold` | `0.30` | local/global TAG 成员重叠阈值 |
 | `--require-same-seqid` | `false` | 合并候选是否要求相同 seqid |
 | `--debug-outputs` | `false` | 是否发布 `local_to_global.tsv` |
 | `--refine-threads` | `12` | 核心 refine 的样本级 worker 上限 |
-| `--flank-overlap-threshold` | `0.20` | 候选块恢复的全局侧翼基因最低比例 |
+| `--flank-overlap-threshold` | `0.30` | 候选块自身侧翼中与全局侧翼重叠的最低比例 |
 
 布尔参数使用成对形式，例如 `--require-same-seqid` / `--no-require-same-seqid`。百分比参数范围为 0–100，比例参数范围为 0–1。
 
@@ -491,7 +493,7 @@ work/global/span_removed_clusters.tsv
 `refine.threads` 控制样本级 worker 数。每个 worker 只顺序扫描一次对应 GFF，并通过
 `gene_name → Candidate cluster` 倒排索引分发实际命中；不再划分粗筛窗口。每个 seqid 上的命中形成
 一个候选块，块外两侧各读取至多 `flanks.gene_count` 个基因；恢复的全局侧翼比例必须达到
-`refine.flank_overlap_threshold`（默认 `0.20`）才是 valid block。
+`refine.flank_overlap_threshold`（默认 `0.30`）才是 valid block；评分分母为该样本候选块实际取得的侧翼基因数。
 
 ### 1. Sequence extraction：逐 Pan-cluster 序列
 
@@ -606,7 +608,7 @@ pixi run snakemake downstream_all \
 | `left_flank_genes` / `right_flank_genes` | 所有合并 local TAG 左/右侧翼名称的分别去重并集 |
 
 `merge.py` 首先在 `work/global/pangenome_TAGs.unrefined.tsv` 中生成连续
-`Candidate_cluster_*`，核心 `pantag.refine` 删除含 span 的候选簇后，严格按候选表原始行顺序重新编号为
+`Candidate_cluster_*`，核心 `pantag.refine` 删除 span 样本比例严格大于 0.9 的候选簇后，严格按候选表原始行顺序重新编号为
 连续 `Pan_cluster_*`。因此正式 ID 不包含因过滤产生的空号。
 
 ### Refined 计数矩阵
@@ -626,9 +628,12 @@ gene_count_cv
 <samples.tsv 中的所有样本列>
 ```
 
-样本单元格仅允许三种形式：正整数表示 `pass`，`N(gap)` 表示检测到但区间含 N/n，`NA`
-表示没有 seed 命中或命中块未通过 flank overlap。最终矩阵不包含 `0` 或任何 `(span)`；任一样本出现 span 时整个
-候选簇已被删除。比例、均值、样本标准差和 CV 固定保留两位小数。
+样本单元格允许四种形式：`NA` 表示未找到任何目标基因；正整数表示唯一有效区块且区间不含 N；
+`N*` 表示唯一有效区块的目标基因区间含 N；`N#` 表示该簇在该样本中存在 span。仅当 span 样本比例
+严格大于 0.9 时删除整个候选簇。比例、均值、样本标准差和 CV 固定保留两位小数，且均值、标准差和
+CV 只使用无符号正整数单元格。
+
+Matrix notation: `NA` indicates that no target gene was identified in the sample; `*` indicates that the target-gene interval contains one or more ambiguous `N` bases; `#` indicates that the cluster spans multiple flank-supported blocks in that sample.
 
 内部审计文件：
 
@@ -639,8 +644,7 @@ results/downstream/TAG_sequence_manifest.tsv
 ```
 
 manifest 只含最终保留、单一 valid block、无 gap 的记录，并使用正式 `Pan_cluster_*` ID。
-gap、span 和 NA 均不进入 manifest。span 审计使用候选 ID，因为被删除簇
-没有正式 ID；审计表记录 `valid_block_count`、`seqids`、`block_coordinates`、
+gap、span 和 NA 均不进入 manifest。span 审计始终使用候选 ID；审计表记录 `valid_block_count`、`seqids`、`block_coordinates`、
 `refined_count`，且 `reason=MULTIPLE_FLANK_SUPPORTED_BLOCKS`。
 
 当 `outputs.debug: true` 时，另发布：
@@ -648,6 +652,19 @@ gap、span 和 NA 均不进入 manifest。span 审计使用候选 ID，因为被
 ```text
 results/global/local_to_global.tsv
 ```
+
+若单样本 `results/local_tags/<sample>_TAGs.tsv` 已全部完成，只需重跑 merge、refine 及其核心目标，可使用：
+
+```bash
+pixi run snakemake all \
+  --snakefile workflow/Snakefile \
+  --configfile config/config.yaml \
+  --cores <THREADS> \
+  --allowed-rules all merge refine \
+  --forcerun merge
+```
+
+该命令要求已有单样本 TAG 表和 `work/fasta_indexes/*.fai`，并复用样本 FASTA/GFF 与 Liftoff 结果；不会重新执行 Liftoff、gffread、DIAMOND、MCScanX、单样本 TAG 识别、假基因召回或 FASTA 建索引。实际重新运行的工作流规则只有 `merge`、`refine` 和汇总目标 `all`。`merge` 会重新生成 candidate 表，`refine` 随后重新生成正式 Pan-TAG 表、计数矩阵、序列 manifest 和审计文件。
 
 默认关闭 debug 时，该映射仍作为工作流内部文件写入 `work/global/local_to_global.tsv`；它记录
 merge 阶段的候选 ID，最终候选到正式 ID 的对应关系见 `refined_cluster_id_map.tsv`。

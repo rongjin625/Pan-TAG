@@ -27,24 +27,6 @@ class AnnotationSchema:
     fallback_gene_name_to_id: bool
 
 
-DEFAULTS = {
-    "gene_feature_types": ["gene"],
-    "pseudogene_feature_types": ["gene", "pseudogene"],
-    "transcript_feature_types": ["mRNA", "transcript"],
-    "gene_id_keys": ["gene_id", "ID"],
-    "gene_name_keys": ["gene_name", "Name", "gene_symbol", "gene", "geneName"],
-    "transcript_id_keys": ["transcript_id", "ID"],
-    "transcript_parent_gene_keys": ["gene_id", "Parent"],
-    "biotype_keys": ["gene_type", "gene_biotype", "biotype"],
-    "coding_filter_mode": "auto",
-    "coding_values": ["protein_coding"],
-    "excluded_attribute_terms": ["readthrough_gene", "readthrough"],
-    "pseudogene_values": ["pseudogene", "processed_pseudogene", "unprocessed_pseudogene"],
-    "strip_id_prefixes": ["gene:", "transcript:"],
-    "fallback_gene_name_to_id": True,
-}
-
-
 def parse_attributes(text: str) -> dict[str, str]:
     attributes: dict[str, str] = {}
     for item in text.strip().split(";"):
@@ -102,10 +84,10 @@ def normalize_id(value: str, prefixes: tuple[str, ...]) -> str:
 def load_schema(config_path: str | Path) -> AnnotationSchema:
     with Path(config_path).open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
-    annotation = config.get("annotation", {})
+    annotation = config["annotation"]
 
     def values(key: str) -> tuple[str, ...]:
-        configured = annotation.get(key, DEFAULTS[key])
+        configured = annotation[key]
         if isinstance(configured, str):
             configured = [configured]
         result = tuple(str(value) for value in configured if str(value))
@@ -114,7 +96,7 @@ def load_schema(config_path: str | Path) -> AnnotationSchema:
         return result
 
     coding_filter_mode = str(
-        annotation.get("coding_filter_mode", DEFAULTS["coding_filter_mode"])
+        annotation["coding_filter_mode"]
     ).lower()
     if coding_filter_mode not in {"auto", "biotype", "translated_protein"}:
         raise ValueError(
@@ -122,7 +104,7 @@ def load_schema(config_path: str | Path) -> AnnotationSchema:
         )
 
     return AnnotationSchema(
-        mode=str(annotation.get("mode", "liftoff")).lower(),
+        mode=str(annotation["mode"]).lower(),
         gene_feature_types=values("gene_feature_types"),
         pseudogene_feature_types=values("pseudogene_feature_types"),
         transcript_feature_types=values("transcript_feature_types"),
@@ -136,9 +118,7 @@ def load_schema(config_path: str | Path) -> AnnotationSchema:
         excluded_attribute_terms=values("excluded_attribute_terms"),
         pseudogene_values=values("pseudogene_values"),
         strip_id_prefixes=values("strip_id_prefixes"),
-        fallback_gene_name_to_id=bool(
-            annotation.get("fallback_gene_name_to_id", DEFAULTS["fallback_gene_name_to_id"])
-        ),
+        fallback_gene_name_to_id=bool(annotation["fallback_gene_name_to_id"]),
     )
 
 

@@ -5,18 +5,30 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from pantag import prepare
 from pantag.gff import load_schema, parse_attributes, transcript_ids
+
+
+def write_annotation_config(path: Path, **overrides: object) -> None:
+    template = yaml.safe_load(
+        Path(__file__).with_name("config.yaml").read_text(encoding="utf-8")
+    )
+    annotation = dict(template["annotation"])
+    annotation.update(overrides)
+    path.write_text(
+        yaml.safe_dump({"annotation": annotation}, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 class GffLiftoffV2Test(unittest.TestCase):
     def test_all_transcript_aliases_are_returned(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / "config.yaml"
-            config.write_text(
-                "annotation:\n"
-                "  transcript_id_keys: [transcript_id, ID]\n",
-                encoding="utf-8",
+            write_annotation_config(
+                config, transcript_id_keys=["transcript_id", "ID"]
             )
             schema = load_schema(config)
             attributes = parse_attributes(
@@ -31,14 +43,13 @@ class GffLiftoffV2Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = root / "config.yaml"
-            config.write_text(
-                "annotation:\n"
-                "  mode: provided\n"
-                "  gene_id_keys: [ID]\n"
-                "  gene_name_keys: [Name]\n"
-                "  transcript_id_keys: [transcript_id, ID]\n"
-                "  transcript_parent_gene_keys: [Parent]\n",
-                encoding="utf-8",
+            write_annotation_config(
+                config,
+                mode="provided",
+                gene_id_keys=["ID"],
+                gene_name_keys=["Name"],
+                transcript_id_keys=["transcript_id", "ID"],
+                transcript_parent_gene_keys=["Parent"],
             )
             gff = root / "reference.gff3"
             gff.write_text(
