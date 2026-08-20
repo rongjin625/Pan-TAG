@@ -72,13 +72,15 @@ def command_validate_inputs(args: argparse.Namespace) -> int:
 
     problems: list[str] = []
     annotation = config.get("annotation", {})
-    annotation_mode = str(annotation.get("mode", "liftoff")).strip().lower()
+    annotation_mode = str(annotation.get("mode", "")).strip().lower()
     if annotation_mode not in {"liftoff", "provided"}:
         problems.append("annotation.mode must be 'liftoff' or 'provided'")
 
     refine = config.get("refine", {})
     try:
-        flank_overlap_threshold = float(refine.get("flank_overlap_threshold", 0.20))
+        flank_overlap_threshold = float(refine["flank_overlap_threshold"])
+    except KeyError:
+        problems.append("Missing config value: refine.flank_overlap_threshold")
     except (TypeError, ValueError):
         problems.append("refine.flank_overlap_threshold must be a number from 0 to 1")
     else:

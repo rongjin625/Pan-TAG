@@ -198,15 +198,26 @@ def configure(args: argparse.Namespace) -> Path:
         if value is not None:
             set_nested(config, path, value)
 
-    annotation = config.get("annotation", {})
+    annotation = config.get("annotation")
     if not isinstance(annotation, dict):
         raise ConfigureError("template annotation must be a mapping")
-    feature_defaults = {
-        "gene_feature_types": ["gene"],
-        "pseudogene_feature_types": ["gene", "pseudogene"],
-    }
-    for key, default in feature_defaults.items():
-        configured = annotation.get(key, default)
+    required_annotation_keys = (
+        "gene_feature_types", "pseudogene_feature_types", "transcript_feature_types",
+        "gene_id_keys", "gene_name_keys", "transcript_id_keys",
+        "transcript_parent_gene_keys", "biotype_keys", "coding_filter_mode",
+        "coding_values", "excluded_attribute_terms", "pseudogene_values",
+        "strip_id_prefixes", "fallback_gene_name_to_id",
+    )
+    missing_annotation = [
+        key for key in required_annotation_keys if key not in annotation
+    ]
+    if missing_annotation:
+        raise ConfigureError(
+            "template annotation is missing required config value(s): "
+            + ", ".join(f"annotation.{key}" for key in missing_annotation)
+        )
+    for key in ("gene_feature_types", "pseudogene_feature_types"):
+        configured = annotation[key]
         if isinstance(configured, str):
             configured = [configured]
         if not isinstance(configured, list) or not any(
@@ -218,20 +229,20 @@ def configure(args: argparse.Namespace) -> Path:
         annotation[key] = configured
 
     if annotation_mode == "liftoff":
-        feature_types = str(config.get("liftoff", {}).get("feature_types", ""))
+        feature_types = str(config["liftoff"]["feature_types"])
         if not feature_types or not Path(feature_types).is_file():
             raise ConfigureError(
                 f"--liftoff-feature-types must identify an existing file, got {feature_types!r}"
             )
-    if config.get("tag", {}).get("family_merge_strategy") == "regex" and not config.get("tag", {}).get("family_merge_regex"):
+    if config["tag"]["family_merge_strategy"] == "regex" and not config["tag"]["family_merge_regex"]:
         raise ConfigureError("--family-merge-regex is required when --family-merge-strategy regex")
     try:
-        refine_threshold = float(config.get("refine", {}).get("flank_overlap_threshold", 0.20))
+        refine_threshold = float(config["refine"]["flank_overlap_threshold"])
     except (TypeError, ValueError) as error:
         raise ConfigureError("refine.flank_overlap_threshold must be a number from 0 to 1") from error
     if not 0 <= refine_threshold <= 1:
         raise ConfigureError("refine.flank_overlap_threshold must be between 0 and 1")
-    family_regex = str(config.get("tag", {}).get("family_merge_regex", ""))
+    family_regex = str(config["tag"]["family_merge_regex"])
     if family_regex:
         try:
             re.compile(family_regex)
@@ -239,7 +250,7 @@ def configure(args: argparse.Namespace) -> Path:
             raise ConfigureError(f"--family-merge-regex is invalid: {error}") from error
 
     directories = [
-        str(config.get(key, "")).strip()
+        str(config[key]).strip()
         for key in ("results_dir", "logs_dir", "work_dir")
     ]
     if any(not value for value in directories) or len(set(directories)) != 3:
@@ -247,9 +258,9 @@ def configure(args: argparse.Namespace) -> Path:
             "--results-dir, --logs-dir and --work-dir must be three non-empty distinct paths"
         )
     executables = {
-        "--diamond-bin": str(config.get("software", {}).get("diamond", "diamond")),
-        "--gffread-bin": str(config.get("software", {}).get("gffread", "gffread")),
-        "--liftoff-bin": str(config.get("liftoff", {}).get("executable", "liftoff")),
+        "--diamond-bin": str(config["software"]["diamond"]),
+        "--gffread-bin": str(config["software"]["gffread"]),
+        "--liftoff-bin": str(config["liftoff"]["executable"]),
     }
     for option, executable in executables.items():
         candidate = Path(executable)
@@ -371,7 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     refinement = parser.add_argument_group("Core refinement options")
     refinement.add_argument("--refine-threads", type=positive_int, help="Workers for core refine")
-    refinement.add_argument("--flank-overlap-threshold", type=fraction, help="Minimum recovered global-flank fraction for a candidate block")
+    refinement.add_argument("--flank-overlap-threshold", type=fraction, help="Minimum fraction of a candidate block's sample flanks matching global flanks")
 
     downstream = parser.add_argument_group("Optional downstream options")
     downstream.add_argument("--cluster-k", type=positive_int, help="k-mer length")

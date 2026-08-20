@@ -9,7 +9,21 @@ import unittest
 from collections import defaultdict
 from pathlib import Path
 
+import yaml
+
 from pantag import merge, prepare, retrieve_pseudogenes, single_sample_tag
+
+
+def write_annotation_config(path: Path, **overrides: object) -> None:
+    template = yaml.safe_load(
+        Path(__file__).with_name("config.yaml").read_text(encoding="utf-8")
+    )
+    annotation = dict(template["annotation"])
+    annotation.update(overrides)
+    path.write_text(
+        yaml.safe_dump({"annotation": annotation}, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 def read_one(path: Path) -> tuple[list[str], dict[str, str]]:
@@ -19,20 +33,26 @@ def read_one(path: Path) -> tuple[list[str], dict[str, str]]:
 
 
 class PublicSchemaTest(unittest.TestCase):
+    def test_merge_member_overlap_threshold_is_required(self) -> None:
+        action = next(
+            item for item in merge.build_parser()._actions
+            if item.dest == "member_overlap_threshold"
+        )
+        self.assertTrue(action.required)
+
     def test_pseudogene_feature_types_require_gene_level_feature_and_biotype(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = root / "config.yaml"
-            config.write_text(
-                "annotation:\n"
-                "  mode: provided\n"
-                "  gene_feature_types: [gene]\n"
-                "  pseudogene_feature_types: [gene, pseudogene]\n"
-                "  gene_id_keys: [gene_id, ID]\n"
-                "  gene_name_keys: [gene_name, Name]\n"
-                "  biotype_keys: [gene_type, gene_biotype, biotype]\n"
-                "  pseudogene_values: [pseudogene, processed_pseudogene]\n",
-                encoding="utf-8",
+            write_annotation_config(
+                config,
+                mode="provided",
+                gene_feature_types=["gene"],
+                pseudogene_feature_types=["gene", "pseudogene"],
+                gene_id_keys=["gene_id", "ID"],
+                gene_name_keys=["gene_name", "Name"],
+                biotype_keys=["gene_type", "gene_biotype", "biotype"],
+                pseudogene_values=["pseudogene", "processed_pseudogene"],
             )
             gff = root / "annotation.gff3"
             gff.write_text(
@@ -243,15 +263,14 @@ class PublicSchemaTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = root / "config.yaml"
-            config.write_text(
-                "annotation:\n"
-                "  mode: provided\n"
-                "  gene_id_keys: [ID]\n"
-                "  gene_name_keys: [Name]\n"
-                "  transcript_id_keys: [ID]\n"
-                "  transcript_parent_gene_keys: [Parent]\n"
-                "  fallback_gene_name_to_id: true\n",
-                encoding="utf-8",
+            write_annotation_config(
+                config,
+                mode="provided",
+                gene_id_keys=["ID"],
+                gene_name_keys=["Name"],
+                transcript_id_keys=["ID"],
+                transcript_parent_gene_keys=["Parent"],
+                fallback_gene_name_to_id=True,
             )
             gff = root / "plant.gff3"
             gff.write_text(
@@ -282,15 +301,14 @@ class PublicSchemaTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = root / "config.yaml"
-            config.write_text(
-                "annotation:\n"
-                "  mode: provided\n"
-                "  gene_id_keys: [ID]\n"
-                "  gene_name_keys: [Name]\n"
-                "  transcript_id_keys: [transcript_id, ID]\n"
-                "  transcript_parent_gene_keys: [Parent]\n"
-                "  coding_filter_mode: auto\n",
-                encoding="utf-8",
+            write_annotation_config(
+                config,
+                mode="provided",
+                gene_id_keys=["ID"],
+                gene_name_keys=["Name"],
+                transcript_id_keys=["transcript_id", "ID"],
+                transcript_parent_gene_keys=["Parent"],
+                coding_filter_mode="auto",
             )
             gff = root / "yeast.gff3"
             gff.write_text(
@@ -324,13 +342,12 @@ class PublicSchemaTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = root / "config.yaml"
-            config.write_text(
-                "annotation:\n"
-                "  mode: provided\n"
-                "  coding_filter_mode: auto\n"
-                "  coding_values: [protein_coding]\n"
-                "  excluded_attribute_terms: [readthrough_gene, readthrough]\n",
-                encoding="utf-8",
+            write_annotation_config(
+                config,
+                mode="provided",
+                coding_filter_mode="auto",
+                coding_values=["protein_coding"],
+                excluded_attribute_terms=["readthrough_gene", "readthrough"],
             )
             genes = (
                 ("H_OK", "gene_type=protein_coding", "HumanCoding"),

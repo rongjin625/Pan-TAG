@@ -73,13 +73,13 @@ pseudogene:
 flanks:
   gene_count: 10
 merge:
-  member_overlap_threshold: 0.2
+  member_overlap_threshold: 0.3
   require_same_seqid: false
 outputs:
   debug: false
 refine:
-  threads: 12
-  flank_overlap_threshold: 0.2
+  threads: 4
+  flank_overlap_threshold: 0.3
 downstream:
   cluster:
     k: 31
@@ -89,7 +89,7 @@ downstream:
     pcoa: true
     seed: 1
     pcoa_jitter_frac: 0.006
-    pcoa_point_size: 12
+    pcoa_point_size: 15
     pcoa_alpha: 0.6
 resources:
   fasta_index_mem_mb: 4000
@@ -101,9 +101,9 @@ resources:
   pseudogene_mem_mb: 8000
   pseudogene_runtime_min: 240
   merge_mem_mb: 8000
-  merge_runtime_min: 480
+  merge_runtime_min: 180
   refine_mem_mb: 8000
-  refine_runtime_min: 480
+  refine_runtime_min: 240
   downstream_extract_mem_mb: 16000
   downstream_extract_runtime_min: 240
   downstream_cluster_mem_mb: 16000

@@ -75,7 +75,7 @@ def filter_blastp(
     return retained
 
 
-def family_prefix(name: str, strategy: str, pattern: str = "") -> str:
+def family_prefix(name: str, strategy: str, pattern: str) -> str:
     if strategy == "none":
         return str(name)
     if strategy == "first_digit_prefix":
@@ -434,17 +434,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mcscanx-gff", required=True)
     parser.add_argument("--gene-map", required=True)
     parser.add_argument("--proteins", required=True)
-    parser.add_argument("--threads", type=int, default=4)
-    parser.add_argument("--min-identity", type=float, default=20.0)
-    parser.add_argument("--min-query-coverage", type=float, default=20.0)
-    parser.add_argument("--min-subject-coverage", type=float, default=20.0)
-    parser.add_argument("--diamond-bin", default="diamond")
+    parser.add_argument("--threads", type=int, required=True)
+    parser.add_argument("--min-identity", type=float, required=True)
+    parser.add_argument("--min-query-coverage", type=float, required=True)
+    parser.add_argument("--min-subject-coverage", type=float, required=True)
+    parser.add_argument("--diamond-bin", required=True)
     parser.add_argument(
         "--family-merge-strategy",
         choices=("none", "first_digit_prefix", "regex"),
-        default="none",
+        required=True,
     )
-    parser.add_argument("--family-merge-regex", default="")
+    parser.add_argument("--family-merge-regex", required=True)
     parser.add_argument("--output-blast-raw", required=True)
     parser.add_argument("--output-blast", required=True)
     parser.add_argument("--output-tandem", required=True)
@@ -453,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config")
     parser.add_argument("--gff")
     parser.add_argument("--fasta")
-    parser.add_argument("--flank-gene-count", type=int, default=10)
+    parser.add_argument("--flank-gene-count", type=int, required=True)
     return parser
 
 

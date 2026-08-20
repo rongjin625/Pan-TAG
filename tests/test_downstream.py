@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import pysam
+import yaml
 
 try:
     from pantag import fasta, refine
@@ -27,6 +28,39 @@ def read_tsv(path: Path) -> list[dict[str, str]]:
 
 @unittest.skipIf(refine is None, f"downstream dependencies unavailable: {IMPORT_ERROR}")
 class CoreRefineTest(unittest.TestCase):
+    def test_refine_flank_threshold_is_required(self) -> None:
+        action = next(
+            item for item in refine.build_parser()._actions
+            if item.dest == "flank_overlap_threshold"
+        )
+        self.assertTrue(action.required)
+
+    def test_span_removal_requires_fraction_strictly_above_point_nine(self) -> None:
+        rows = [
+            {"candidate_global_tag_id": "at_0_9", "sample_id": f"S{i}"}
+            for i in range(9)
+        ] + [
+            {"candidate_global_tag_id": "above_0_9", "sample_id": f"S{i}"}
+            for i in range(10)
+        ]
+        self.assertEqual(refine.span_candidates_to_remove(rows, 10), {"above_0_9"})
+
+    def test_flank_score_uses_recovered_sample_flank_as_denominator(self) -> None:
+        genes = [
+            refine.GeneLite(str(i), name, name, i, i, "+")
+            for i, name in enumerate(("L1", "L2", "TAG", "R1", "R2"), start=1)
+        ]
+        hit = refine.TagHit("tag", "TAG", "TAG", "chr1", 3, 3, "+", 2)
+        self.assertEqual(
+            refine.flank_score(genes, [hit], frozenset({"L1", "R1"}), 2),
+            0.5,
+        )
+        isolated_hit = refine.TagHit("tag", "TAG", "TAG", "chr1", 3, 3, "+", 0)
+        self.assertEqual(
+            refine.flank_score([genes[2]], [isolated_hit], frozenset({"L1"}), 2),
+            -1.0,
+        )
+
     def test_fasta_index_can_be_stored_outside_read_only_input_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -105,7 +139,15 @@ class CoreRefineTest(unittest.TestCase):
                 encoding="utf-8",
             )
             config = root / "config.yaml"
-            config.write_text("annotation:\n  mode: provided\n", encoding="utf-8")
+            template = yaml.safe_load(
+                Path(__file__).with_name("config.yaml").read_text(encoding="utf-8")
+            )
+            annotation = dict(template["annotation"])
+            annotation["mode"] = "provided"
+            config.write_text(
+                yaml.safe_dump({"annotation": annotation}, sort_keys=False),
+                encoding="utf-8",
+            )
             outputs = {
                 key: root / value for key, value in {
                     "tags": "pangenome_TAGs.tsv",
@@ -132,19 +174,20 @@ class CoreRefineTest(unittest.TestCase):
             id_map = read_tsv(outputs["map"])
             spans = read_tsv(outputs["span"])
             final_ids = [
-                "Pan_cluster_0001", "Pan_cluster_0002",
-                "Pan_cluster_0003", "Pan_cluster_0004",
+                "Pan_cluster_0001", "Pan_cluster_0002", "Pan_cluster_0003",
+                "Pan_cluster_0004", "Pan_cluster_0005",
             ]
             self.assertEqual([row["global_tag_id"] for row in final_tags], final_ids)
             self.assertEqual([row["global_tag_id"] for row in matrix], final_ids)
             self.assertEqual(list(matrix[0])[-2:], ["ref", "sample1"])
             self.assertEqual(
-                sorted({row["global_tag_id"] for row in manifest}), final_ids[:3]
+                sorted({row["global_tag_id"] for row in manifest}), final_ids[:4]
             )
             self.assertEqual((matrix[0]["ref"], matrix[0]["sample1"]), ("2", "2"))
-            self.assertEqual((matrix[1]["ref"], matrix[1]["sample1"]), ("1", "1(gap)"))
+            self.assertEqual((matrix[1]["ref"], matrix[1]["sample1"]), ("1", "1*"))
             self.assertEqual((matrix[2]["ref"], matrix[2]["sample1"]), ("1", "NA"))
-            self.assertEqual((matrix[3]["ref"], matrix[3]["sample1"]), ("NA", "NA"))
+            self.assertEqual((matrix[3]["ref"], matrix[3]["sample1"]), ("1", "2#"))
+            self.assertEqual((matrix[4]["ref"], matrix[4]["sample1"]), ("NA", "NA"))
             self.assertEqual(matrix[1]["detected_sample_count"], "2")
             self.assertEqual(matrix[1]["gap_free_sample_count"], "1")
             self.assertEqual(matrix[1]["gap_free_sample_fraction"], "0.50")
@@ -153,7 +196,7 @@ class CoreRefineTest(unittest.TestCase):
             self.assertEqual(matrix[1]["gene_count_cv"], "0.00")
             sample_columns = ["ref", "sample1"]
             self.assertFalse(any(
-                "(span)" in row[sample] or row[sample] == "0"
+                row[sample] == "0"
                 for row in matrix
                 for sample in sample_columns
             ))
@@ -163,9 +206,9 @@ class CoreRefineTest(unittest.TestCase):
                     ("Candidate_cluster_0001", "Pan_cluster_0001", "retained"),
                     ("Candidate_cluster_0002", "Pan_cluster_0002", "retained"),
                     ("Candidate_cluster_0003", "Pan_cluster_0003", "retained"),
-                    ("Candidate_cluster_0004", "", "removed_span"),
+                    ("Candidate_cluster_0004", "Pan_cluster_0004", "retained"),
                     ("Candidate_cluster_0005", "", "removed_span"),
-                    ("Candidate_cluster_0006", "Pan_cluster_0004", "retained"),
+                    ("Candidate_cluster_0006", "Pan_cluster_0005", "retained"),
                 ],
             )
             self.assertEqual(len([row for row in spans if row["candidate_global_tag_id"] == "Candidate_cluster_0004"]), 1)
@@ -177,6 +220,10 @@ class CoreRefineTest(unittest.TestCase):
             self.assertFalse(any(row["qc_status"] != "pass" for row in manifest))
             self.assertFalse(any(
                 row["global_tag_id"] == "Pan_cluster_0002" and row["sample_id"] == "sample1"
+                for row in manifest
+            ))
+            self.assertFalse(any(
+                row["global_tag_id"] == "Pan_cluster_0004" and row["sample_id"] == "sample1"
                 for row in manifest
             ))
             for sample_id in ("ref", "sample1"):

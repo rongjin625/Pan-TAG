@@ -27,13 +27,13 @@ def executable(value):
     return str(value) if path.parent == Path(".") else run_path(path)
 
 
-SAMPLES_FILE = run_path(config.get("samples", "config/samples.tsv"))
-RESULTS = run_path(config.get("results_dir", "results"))
-LOGS = run_path(config.get("logs_dir", "logs"))
-WORK = run_path(config.get("work_dir", "work"))
-SOFTWARE_CONFIG = config.get("software", {})
-DIAMOND_BIN = executable(SOFTWARE_CONFIG.get("diamond", "diamond"))
-GFFREAD_BIN = executable(SOFTWARE_CONFIG.get("gffread", "gffread"))
+SAMPLES_FILE = run_path(config["samples"])
+RESULTS = run_path(config["results_dir"])
+LOGS = run_path(config["logs_dir"])
+WORK = run_path(config["work_dir"])
+SOFTWARE_CONFIG = config["software"]
+DIAMOND_BIN = executable(SOFTWARE_CONFIG["diamond"])
+GFFREAD_BIN = executable(SOFTWARE_CONFIG["gffread"])
 MCScanX_BUILD_SCRIPT = str(PROJECT_ROOT / "src/pantag/mcscanx/build.sh")
 MCScanX_SOURCE = str(PROJECT_ROOT / "src/pantag/mcscanx/MCScanX-source.tar.gz")
 LIFTOFF_DB_SCRIPT = str(PROJECT_ROOT / "src/pantag/liftoff_db.py")
@@ -85,7 +85,7 @@ FASTA_INDEXES = [
     f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', sample)}.fai"
     for sample in SAMPLE_ORDER
 ]
-ANNOTATION_MODE = str(config.get("annotation", {}).get("mode", "liftoff")).lower()
+ANNOTATION_MODE = str(config["annotation"]["mode"]).lower()
 if ANNOTATION_MODE not in {"liftoff", "provided"}:
     raise ValueError("annotation.mode must be 'liftoff' or 'provided'")
 for sample, row in TARGETS.items():
@@ -98,9 +98,9 @@ LIFTOFF_SAMPLES = sorted(TARGETS) if ANNOTATION_MODE == "liftoff" else []
 LIFTOFF_PATTERN = (
     "|".join(re.escape(sample) for sample in LIFTOFF_SAMPLES) or r"(?!)"
 )
-LIFTOFF_CONFIG = config.get("liftoff", {})
-LIFTOFF_ENVIRONMENT = str(LIFTOFF_CONFIG.get("pixi_environment", "liftoff"))
-_liftoff_executable = Path(str(LIFTOFF_CONFIG.get("executable", "liftoff"))).expanduser()
+LIFTOFF_CONFIG = config["liftoff"]
+LIFTOFF_ENVIRONMENT = str(LIFTOFF_CONFIG["pixi_environment"])
+_liftoff_executable = Path(str(LIFTOFF_CONFIG["executable"])).expanduser()
 LIFTOFF_BIN = (
     str(_liftoff_executable.resolve())
     if _liftoff_executable.parent != Path(".")
@@ -110,41 +110,21 @@ LIFTOFF_PYTHON = str(
     PROJECT_ROOT / ".pixi/envs" / LIFTOFF_ENVIRONMENT / "bin/python"
 )
 LIFTOFF_REFERENCE_DB = f"{WORK}/liftoff/reference_annotation.db"
-LIFTOFF_FEATURE_TYPES = (
-    run_path(LIFTOFF_CONFIG["feature_types"])
-    if LIFTOFF_CONFIG.get("feature_types")
-    else "LIFTOFF_NOT_CONFIGURED"
-)
-if LIFTOFF_SAMPLES:
-    missing_liftoff = [
-        key
-        for key in ("feature_types",)
-        if not LIFTOFF_CONFIG.get(key)
-    ]
-    if missing_liftoff:
-        raise ValueError(
-            "Samples without GFF require liftoff config values: "
-            + ", ".join(missing_liftoff)
-        )
+LIFTOFF_FEATURE_TYPES = run_path(LIFTOFF_CONFIG["feature_types"])
 MCScanX_BIN = f"{WORK}/software/MCScanX_pantag"
 MCScanX_BUILD_INFO = f"{WORK}/software/MCScanX_pantag.build_info.txt"
 DOWNSTREAM = f"{RESULTS}/downstream"
-DOWNSTREAM_CONFIG = config.get("downstream", {})
-REFINE_CONFIG = config.get("refine", {})
-REFINE_FLANK_THRESHOLD = float(REFINE_CONFIG.get("flank_overlap_threshold", 0.20))
+DOWNSTREAM_CONFIG = config["downstream"]
+REFINE_CONFIG = config["refine"]
+REFINE_FLANK_THRESHOLD = float(REFINE_CONFIG["flank_overlap_threshold"])
 if not 0 <= REFINE_FLANK_THRESHOLD <= 1:
     raise ValueError("refine.flank_overlap_threshold must be between 0 and 1")
-CLUSTER_CONFIG = DOWNSTREAM_CONFIG.get("cluster", {})
-PSEUDOGENE_CONFIG = config.get("pseudogene", {})
-if "enabled" not in PSEUDOGENE_CONFIG:
-    raise ValueError(
-        "pseudogene.enabled is required; generate config with "
-        "--pseudogene-enabled or --no-pseudogene-enabled"
-    )
+CLUSTER_CONFIG = DOWNSTREAM_CONFIG["cluster"]
+PSEUDOGENE_CONFIG = config["pseudogene"]
 PSEUDOGENE_ENABLED = bool(PSEUDOGENE_CONFIG["enabled"])
-FLANK_CONFIG = config.get("flanks", {})
-OUTPUT_CONFIG = config.get("outputs", {})
-DEBUG_OUTPUTS = bool(OUTPUT_CONFIG.get("debug", False))
+FLANK_CONFIG = config["flanks"]
+OUTPUT_CONFIG = config["outputs"]
+DEBUG_OUTPUTS = bool(OUTPUT_CONFIG["debug"])
 LOCAL_TO_GLOBAL = (
     f"{RESULTS}/global/local_to_global.tsv"
     if DEBUG_OUTPUTS else f"{WORK}/global/local_to_global.tsv"
@@ -266,10 +246,10 @@ rule liftoff:
         intermediate=f"{WORK}/liftoff/{{sample}}/intermediate_files_{{sample}}",
         executable=LIFTOFF_BIN,
     threads:
-        LIFTOFF_CONFIG.get("threads", 8)
+        LIFTOFF_CONFIG["threads"]
     resources:
-        mem_mb=config.get("resources", {}).get("liftoff_mem_mb", 48000),
-        runtime=config.get("resources", {}).get("liftoff_runtime_min", 1440),
+        mem_mb=config["resources"]["liftoff_mem_mb"],
+        runtime=config["resources"]["liftoff_runtime_min"],
     log:
         f"{LOGS}/liftoff/{{sample}}.log",
     wildcard_constraints:
@@ -361,18 +341,18 @@ rule single_sample_tag:
         ),
     params:
         workdir=lambda wc: f"{WORK}/{wc.sample}",
-        identity=config.get("tag", {}).get("blastp_identity", 20),
-        query_coverage=config.get("tag", {}).get("blastp_query_coverage", 20),
-        subject_coverage=config.get("tag", {}).get("blastp_subject_coverage", 20),
-        family_strategy=config.get("tag", {}).get("family_merge_strategy", "none"),
-        family_regex=config.get("tag", {}).get("family_merge_regex", ""),
+        identity=config["tag"]["blastp_identity"],
+        query_coverage=config["tag"]["blastp_query_coverage"],
+        subject_coverage=config["tag"]["blastp_subject_coverage"],
+        family_strategy=config["tag"]["family_merge_strategy"],
+        family_regex=config["tag"]["family_merge_regex"],
         diamond=DIAMOND_BIN,
-        flank_genes=FLANK_CONFIG.get("gene_count", 10),
+        flank_genes=FLANK_CONFIG["gene_count"],
     threads:
-        config.get("tag", {}).get("diamond_threads", 4)
+        config["tag"]["diamond_threads"]
     resources:
-        mem_mb=config.get("resources", {}).get("single_sample_mem_mb", 16000),
-        runtime=config.get("resources", {}).get("single_sample_runtime_min", 240),
+        mem_mb=config["resources"]["single_sample_mem_mb"],
+        runtime=config["resources"]["single_sample_runtime_min"],
     log:
         f"{LOGS}/single_sample_tag/{{sample}}.log",
     shell:
@@ -420,17 +400,17 @@ rule retrieve_pseudogenes:
         ),
     params:
         workdir=lambda wc: f"{WORK}/{wc.sample}/pseudogenes",
-        flank_bp=PSEUDOGENE_CONFIG.get("search_flank_bp", 50000),
-        flank_genes=FLANK_CONFIG.get("gene_count", 10),
-        identity=PSEUDOGENE_CONFIG.get("blastx_identity", 20),
-        query_coverage=PSEUDOGENE_CONFIG.get("blastx_query_coverage", 20),
-        subject_coverage=PSEUDOGENE_CONFIG.get("blastx_subject_coverage", 20),
+        flank_bp=PSEUDOGENE_CONFIG["search_flank_bp"],
+        flank_genes=FLANK_CONFIG["gene_count"],
+        identity=PSEUDOGENE_CONFIG["blastx_identity"],
+        query_coverage=PSEUDOGENE_CONFIG["blastx_query_coverage"],
+        subject_coverage=PSEUDOGENE_CONFIG["blastx_subject_coverage"],
         diamond=DIAMOND_BIN,
     threads:
-        config.get("tag", {}).get("diamond_threads", 4)
+        config["tag"]["diamond_threads"]
     resources:
-        mem_mb=config.get("resources", {}).get("pseudogene_mem_mb", 16000),
-        runtime=config.get("resources", {}).get("pseudogene_runtime_min", 240),
+        mem_mb=config["resources"]["pseudogene_mem_mb"],
+        runtime=config["resources"]["pseudogene_runtime_min"],
     log:
         f"{LOGS}/retrieve_pseudogenes/{{sample}}.log",
     shell:
@@ -467,15 +447,15 @@ rule merge:
         mapping=LOCAL_TO_GLOBAL,
     params:
         reference=REFERENCE,
-        threshold=config.get("merge", {}).get("member_overlap_threshold", 0.1),
+        threshold=config["merge"]["member_overlap_threshold"],
         same_seqid_arg=(
             "--require-same-seqid"
-            if config.get("merge", {}).get("require_same_seqid", False)
+            if config["merge"]["require_same_seqid"]
             else ""
         ),
     resources:
-        mem_mb=config.get("resources", {}).get("merge_mem_mb", 32000),
-        runtime=config.get("resources", {}).get("merge_runtime_min", 480),
+        mem_mb=config["resources"]["merge_mem_mb"],
+        runtime=config["resources"]["merge_runtime_min"],
     log:
         f"{LOGS}/merge.log",
     shell:
@@ -498,8 +478,8 @@ rule fasta_indexes:
     output:
         FASTA_INDEXES,
     resources:
-        mem_mb=config.get("resources", {}).get("fasta_index_mem_mb", 4000),
-        runtime=config.get("resources", {}).get("fasta_index_runtime_min", 120),
+        mem_mb=config["resources"]["fasta_index_mem_mb"],
+        runtime=config["resources"]["fasta_index_runtime_min"],
     log:
         f"{LOGS}/fasta_index.log",
     shell:
@@ -531,13 +511,13 @@ rule refine:
     params:
         target_gff_dir=f"{RESULTS}/liftoff",
         workdir=f"{WORK}/refine",
-        flank_gene_count=FLANK_CONFIG.get("gene_count", 10),
+        flank_gene_count=FLANK_CONFIG["gene_count"],
         flank_overlap_threshold=REFINE_FLANK_THRESHOLD,
     threads:
-        REFINE_CONFIG.get("threads", 4)
+        REFINE_CONFIG["threads"]
     resources:
-        mem_mb=config.get("resources", {}).get("refine_mem_mb", 32000),
-        runtime=config.get("resources", {}).get("refine_runtime_min", 480),
+        mem_mb=config["resources"]["refine_mem_mb"],
+        runtime=config["resources"]["refine_runtime_min"],
     log:
         f"{LOGS}/refine.log",
     shell:
@@ -576,8 +556,8 @@ checkpoint downstream_extract:
         fastas=directory(f"{DOWNSTREAM}/sequences/per_TAG"),
         records=f"{DOWNSTREAM}/sequences/sequence_records.tsv",
     resources:
-        mem_mb=config.get("resources", {}).get("downstream_extract_mem_mb", 16000),
-        runtime=config.get("resources", {}).get("downstream_extract_runtime_min", 240),
+        mem_mb=config["resources"]["downstream_extract_mem_mb"],
+        runtime=config["resources"]["downstream_extract_runtime_min"],
     log:
         f"{LOGS}/downstream/extract.log",
     shell:
@@ -625,21 +605,21 @@ rule downstream_cluster_tag:
         cross_table=f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/cluster_gene_sample_counts.tsv",
         summary=f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/summary.tsv",
     params:
-        k=CLUSTER_CONFIG.get("k", 31),
-        ubiquitous=CLUSTER_CONFIG.get("ubiquitous_threshold", 0.95),
-        max_clusters=CLUSTER_CONFIG.get("max_clusters", 0),
-        min_sequences=CLUSTER_CONFIG.get("min_sequences", 3),
-        seed=CLUSTER_CONFIG.get("seed", 1),
-        jitter=CLUSTER_CONFIG.get("pcoa_jitter_frac", 0.006),
-        point_size=CLUSTER_CONFIG.get("pcoa_point_size", 4.0),
-        alpha=CLUSTER_CONFIG.get("pcoa_alpha", 0.25),
+        k=CLUSTER_CONFIG["k"],
+        ubiquitous=CLUSTER_CONFIG["ubiquitous_threshold"],
+        max_clusters=CLUSTER_CONFIG["max_clusters"],
+        min_sequences=CLUSTER_CONFIG["min_sequences"],
+        seed=CLUSTER_CONFIG["seed"],
+        jitter=CLUSTER_CONFIG["pcoa_jitter_frac"],
+        point_size=CLUSTER_CONFIG["pcoa_point_size"],
+        alpha=CLUSTER_CONFIG["pcoa_alpha"],
         pcoa_arg=lambda wc: (
             f"--pcoa {DOWNSTREAM}/clusters/per_TAG/{wc.global_tag}/pcoa.pdf"
-            if CLUSTER_CONFIG.get("pcoa", True) else ""
+            if CLUSTER_CONFIG["pcoa"] else ""
         ),
     resources:
-        mem_mb=config.get("resources", {}).get("downstream_cluster_mem_mb", 16000),
-        runtime=config.get("resources", {}).get("downstream_cluster_runtime_min", 240),
+        mem_mb=config["resources"]["downstream_cluster_mem_mb"],
+        runtime=config["resources"]["downstream_cluster_runtime_min"],
     log:
         f"{LOGS}/downstream/cluster/{{global_tag}}.log",
     wildcard_constraints:

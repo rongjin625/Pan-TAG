@@ -26,6 +26,7 @@ annotation:
   coding_values: [protein_coding]
   excluded_attribute_terms: [readthrough_gene, readthrough]
   pseudogene_values: [pseudogene, processed_pseudogene, unprocessed_pseudogene]
+  strip_id_prefixes: ["gene:", "transcript:"]
   fallback_gene_name_to_id: true
 
 liftoff:
@@ -40,6 +41,7 @@ tag:
   blastp_query_coverage: 20
   blastp_subject_coverage: 20
   family_merge_strategy: none
+  family_merge_regex: ""
 
 pseudogene:
   enabled: true
@@ -52,12 +54,27 @@ flanks:
   gene_count: 10
 
 merge:
-  member_overlap_threshold: 0.1
+  member_overlap_threshold: 0.3
   require_same_seqid: false
+
+outputs:
+  debug: false
 
 refine:
   threads: 2
-  flank_overlap_threshold: 0.20
+  flank_overlap_threshold: 0.30
+
+downstream:
+  cluster:
+    k: 31
+    ubiquitous_threshold: 0.8
+    max_clusters: 8
+    min_sequences: 3
+    pcoa: true
+    seed: 1
+    pcoa_jitter_frac: 0.006
+    pcoa_point_size: 12
+    pcoa_alpha: 0.6
 
 resources:
   fasta_index_mem_mb: 2000
@@ -72,3 +89,7 @@ resources:
   merge_runtime_min: 60
   refine_mem_mb: 8000
   refine_runtime_min: 60
+  downstream_extract_mem_mb: 8000
+  downstream_extract_runtime_min: 60
+  downstream_cluster_mem_mb: 8000
+  downstream_cluster_runtime_min: 60

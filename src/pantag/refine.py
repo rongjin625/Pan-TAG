@@ -228,7 +228,7 @@ def flank_score(genes, hits, cluster_flank, flank_count: int) -> float:
         + genes[last + 1:last + 1 + flank_count]
     )
     sample_flank = {gene.cleaned_name for gene in flank_genes}
-    return len(sample_flank & cluster_flank) / len(cluster_flank) if cluster_flank else -1.0
+    return len(sample_flank & cluster_flank) / len(sample_flank) if sample_flank else -1.0
 
 
 def scan_sample(asset: SampleAsset, workdir: str):
@@ -273,7 +273,7 @@ def scan_sample(asset: SampleAsset, workdir: str):
             if len(valid) > 1:
                 count_rows.append({
                     "candidate_global_tag_id": candidate_id, "sample_id": asset.sample_id,
-                    "matrix_cell": f"{total}(span)", "status": "span",
+                    "matrix_cell": f"{total}#", "status": "span",
                 })
                 span_rows.append({
                     "candidate_global_tag_id": candidate_id, "sample_id": asset.sample_id,
@@ -290,7 +290,7 @@ def scan_sample(asset: SampleAsset, workdir: str):
             if "N" in fasta.fetch(seqid, block_start - 1, block_end).upper():
                 count_rows.append({
                     "candidate_global_tag_id": candidate_id, "sample_id": asset.sample_id,
-                    "matrix_cell": f"{total}(gap)", "status": "gap",
+                    "matrix_cell": f"{total}*", "status": "gap",
                 })
                 continue
             count_rows.append({
@@ -354,6 +354,21 @@ def summarize(cells: list[str]) -> dict[str, object]:
     }
 
 
+def span_candidates_to_remove(
+    span_rows: list[dict[str, str]], total_sample_count: int
+) -> set[str]:
+    samples_by_candidate: dict[str, set[str]] = {}
+    for row in span_rows:
+        samples_by_candidate.setdefault(row["candidate_global_tag_id"], set()).add(
+            row["sample_id"]
+        )
+    return {
+        candidate_id
+        for candidate_id, sample_ids in samples_by_candidate.items()
+        if len(sample_ids) / total_sample_count > 0.9
+    }
+
+
 def combine_manifests(path, assets, manifest_paths, id_map) -> None:
     def rows():
         for asset in assets:
@@ -411,7 +426,7 @@ def run(args: argparse.Namespace) -> None:
             span_rows.extend(csv.DictReader(handle, delimiter="\t"))
     rank = {candidate_id: index for index, candidate_id in enumerate(order)}
     span_rows.sort(key=lambda row: (rank[row["candidate_global_tag_id"]], row["sample_id"]))
-    removed = {row["candidate_global_tag_id"] for row in span_rows}
+    removed = span_candidates_to_remove(span_rows, len(assets))
     id_map, map_rows = {}, []
     for candidate_id in order:
         if candidate_id in removed:
@@ -438,7 +453,7 @@ def run(args: argparse.Namespace) -> None:
         raw.pop("candidate_global_tag_id", None)
         final_rows.append({"global_tag_id": final_id, **raw})
         cells = [counts_by_sample[sample].get(candidate_id, "NA") for sample in sample_ids]
-        if any("(span)" in cell or cell == "0" for cell in cells):
+        if any(cell == "0" for cell in cells):
             raise RefineError(f"Invalid final matrix state for {candidate_id}: {cells}")
         matrix_rows.append({
             "global_tag_id": final_id, "gene_names": raw["gene_names"],
@@ -473,9 +488,9 @@ def build_parser() -> argparse.ArgumentParser:
         "output-matrix", "output-manifest", "output-id-map", "output-span-audit",
     ):
         parser.add_argument(f"--{option}", required=True)
-    parser.add_argument("--flank-gene-count", type=int, default=10)
-    parser.add_argument("--flank-overlap-threshold", type=float, default=0.20)
-    parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--flank-gene-count", type=int, required=True)
+    parser.add_argument("--flank-overlap-threshold", type=float, required=True)
+    parser.add_argument("--threads", type=int, required=True)
     parser.add_argument("--fasta-indexes", nargs="+", required=True)
     return parser
 

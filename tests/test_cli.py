@@ -20,27 +20,17 @@ class ConfigureCliTest(unittest.TestCase):
         self.features = self.root / "features.txt"
         self.features.write_text("gene\n", encoding="utf-8")
         self.template = self.root / "template.yaml"
+        template_config = yaml.safe_load(
+            Path(__file__).with_name("config.yaml").read_text(encoding="utf-8")
+        )
+        template_config["reference"] = {
+            "sample_id": "old", "fasta": "old", "gff": "old"
+        }
+        template_config["samples"] = "old.tsv"
+        template_config["annotation"]["gene_id_keys"] = ["ID"]
+        template_config["liftoff"]["feature_types"] = str(self.features)
         self.template.write_text(
-            yaml.safe_dump(
-                {
-                    "reference": {"sample_id": "old", "fasta": "old", "gff": "old"},
-                    "samples": "old.tsv",
-                    "results_dir": "results",
-                    "logs_dir": "logs",
-                    "work_dir": "work",
-                    "annotation": {
-                        "mode": "liftoff",
-                        "gene_feature_types": ["gene"],
-                        "pseudogene_feature_types": ["gene", "pseudogene"],
-                        "gene_id_keys": ["ID"],
-                    },
-                    "liftoff": {"feature_types": str(self.features)},
-                    "pseudogene": {"enabled": True, "search_flank_bp": 50000},
-                    "flanks": {"gene_count": 10},
-                    "merge": {"member_overlap_threshold": 0.1},
-                },
-                sort_keys=False,
-            ),
+            yaml.safe_dump(template_config, sort_keys=False),
             encoding="utf-8",
         )
 
@@ -86,7 +76,7 @@ class ConfigureCliTest(unittest.TestCase):
         self.assertEqual(config["annotation"]["gene_id_keys"], ["ID"])
         self.assertEqual(config["pseudogene"]["search_flank_bp"], 25000)
         self.assertEqual(config["flanks"]["gene_count"], 6)
-        self.assertEqual(config["merge"]["member_overlap_threshold"], 0.1)
+        self.assertEqual(config["merge"]["member_overlap_threshold"], 0.3)
 
     def test_pseudogene_feature_types_cli_override(self) -> None:
         samples = self.write_samples(target_gff=True)
@@ -104,7 +94,7 @@ class ConfigureCliTest(unittest.TestCase):
             ["gene", "pseudogene"],
         )
 
-    def test_old_template_receives_pseudogene_feature_default(self) -> None:
+    def test_incomplete_template_does_not_receive_hidden_defaults(self) -> None:
         old_template = self.root / "old-template.yaml"
         config = yaml.safe_load(self.template.read_text(encoding="utf-8"))
         config["annotation"].pop("pseudogene_feature_types")
@@ -118,11 +108,8 @@ class ConfigureCliTest(unittest.TestCase):
             "--template", str(old_template),
             "--output", str(self.root / "upgraded.yaml"),
         ])
-        upgraded = yaml.safe_load(configure(args).read_text(encoding="utf-8"))
-        self.assertEqual(
-            upgraded["annotation"]["pseudogene_feature_types"],
-            ["gene", "pseudogene"],
-        )
+        with self.assertRaisesRegex(ConfigureError, "pseudogene_feature_types"):
+            configure(args)
 
     def test_configure_liftoff_accepts_empty_target_gff(self) -> None:
         output = configure(self.args(self.write_samples(target_gff=False), "liftoff"))

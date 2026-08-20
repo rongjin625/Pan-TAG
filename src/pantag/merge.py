@@ -477,7 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference-sample", required=True)
     parser.add_argument("--local-tags", nargs="+", required=True)
-    parser.add_argument("--member-overlap-threshold", type=float, default=0.1)
+    parser.add_argument("--member-overlap-threshold", type=float, required=True)
     parser.add_argument(
         "--require-same-seqid",
         action="store_true",
