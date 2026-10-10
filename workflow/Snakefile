@@ -6,6 +6,7 @@ pixi run snakemake --snakefile workflow/Snakefile \
 """
 
 import csv
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -76,13 +77,12 @@ ALL_SAMPLES = [REFERENCE] + sorted(TARGETS)
 REFERENCE_FASTA = run_path(config["reference"]["fasta"])
 REFERENCE_GFF = run_path(config["reference"]["gff"])
 SAMPLE_ORDER = [REFERENCE] + list(TARGETS)
-FASTA_FILES = [
-    REFERENCE_FASTA if sample == REFERENCE else TARGETS[sample]["fasta"]
-    for sample in SAMPLE_ORDER
-]
+SAMPLE_FASTAS = {
+    REFERENCE: REFERENCE_FASTA,
+    **{sample: row["fasta"] for sample, row in TARGETS.items()},
+}
 FASTA_INDEXES = [
-    f"{WORK}/fasta_indexes/"
-    f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', sample)}.fai"
+    f"{WORK}/{sample}/genome.fa.fai"
     for sample in SAMPLE_ORDER
 ]
 ANNOTATION_MODE = str(config["annotation"]["mode"]).lower()
@@ -94,6 +94,17 @@ for sample, row in TARGETS.items():
         raise ValueError(f"{sample}: gff must be empty in liftoff mode")
     if ANNOTATION_MODE == "provided" and not provided_gff:
         raise ValueError(f"{sample}: gff is required in provided mode")
+SAMPLE_GFFS = {
+    REFERENCE: REFERENCE_GFF,
+    **{
+        sample: (
+            row["gff"]
+            if ANNOTATION_MODE == "provided"
+            else f"{RESULTS}/liftoff/{sample}.liftoff.gff3"
+        )
+        for sample, row in TARGETS.items()
+    },
+}
 LIFTOFF_SAMPLES = sorted(TARGETS) if ANNOTATION_MODE == "liftoff" else []
 LIFTOFF_PATTERN = (
     "|".join(re.escape(sample) for sample in LIFTOFF_SAMPLES) or r"(?!)"
@@ -110,16 +121,41 @@ LIFTOFF_PYTHON = str(
     PROJECT_ROOT / ".pixi/envs" / LIFTOFF_ENVIRONMENT / "bin/python"
 )
 LIFTOFF_REFERENCE_DB = f"{WORK}/liftoff/reference_annotation.db"
-LIFTOFF_FEATURE_TYPES = run_path(LIFTOFF_CONFIG["feature_types"])
+LIFTOFF_FEATURE_TYPES = str(PROJECT_ROOT / "config/liftoff_features.txt")
 MCScanX_BIN = f"{WORK}/software/MCScanX_pantag"
 MCScanX_BUILD_INFO = f"{WORK}/software/MCScanX_pantag.build_info.txt"
 DOWNSTREAM = f"{RESULTS}/downstream"
+DOWNSTREAM_WORK = f"{WORK}/downstream"
+STRUCTURE_GENE_INDEX = f"{DOWNSTREAM_WORK}/structure_genes.sqlite"
 DOWNSTREAM_CONFIG = config["downstream"]
+EXTRACT_CONFIG = DOWNSTREAM_CONFIG["extract"]
 REFINE_CONFIG = config["refine"]
 REFINE_FLANK_THRESHOLD = float(REFINE_CONFIG["flank_overlap_threshold"])
 if not 0 <= REFINE_FLANK_THRESHOLD <= 1:
     raise ValueError("refine.flank_overlap_threshold must be between 0 and 1")
 CLUSTER_CONFIG = DOWNSTREAM_CONFIG["cluster"]
+RUNTIME_DOWNSTREAM_TARGETS_RAW = str(config.get("_pantag_downstream_targets", "__ALL__"))
+RUNTIME_DOWNSTREAM_ALL = RUNTIME_DOWNSTREAM_TARGETS_RAW == "__ALL__"
+RUNTIME_DOWNSTREAM_TARGETS = (
+    [] if RUNTIME_DOWNSTREAM_ALL
+    else list(dict.fromkeys(
+        tag.strip() for tag in RUNTIME_DOWNSTREAM_TARGETS_RAW.split(",") if tag.strip()
+    ))
+)
+if not RUNTIME_DOWNSTREAM_ALL and not RUNTIME_DOWNSTREAM_TARGETS:
+    raise ValueError("No Pan-cluster IDs were supplied at runtime")
+if any(not re.fullmatch(r"[A-Za-z0-9_.-]+", tag) for tag in RUNTIME_DOWNSTREAM_TARGETS):
+    raise ValueError("Runtime Pan-cluster IDs may contain only letters, digits, '.', '_' and '-'")
+DOWNSTREAM_SELECTION_ID = hashlib.sha256(
+    RUNTIME_DOWNSTREAM_TARGETS_RAW.encode("utf-8")
+).hexdigest()[:12]
+CONFIG_PATH = run_path(workflow.configfiles[0])
+PCOA_ENABLED = bool(CLUSTER_CONFIG["pcoa"])
+CLUSTER_PCOA_PATTERN = (
+    f"{DOWNSTREAM}/{{global_tag}}/clusters/{{global_tag}}_pcoa.pdf"
+    if PCOA_ENABLED
+    else f"{DOWNSTREAM_WORK}/clusters/{{global_tag}}/pcoa.disabled"
+)
 PSEUDOGENE_CONFIG = config["pseudogene"]
 PSEUDOGENE_ENABLED = bool(PSEUDOGENE_CONFIG["enabled"])
 FLANK_CONFIG = config["flanks"]
@@ -138,23 +174,11 @@ if DEBUG_OUTPUTS:
 
 
 def sample_fasta(wildcards):
-    if wildcards.sample == REFERENCE:
-        return REFERENCE_FASTA
-    return TARGETS[wildcards.sample]["fasta"]
+    return SAMPLE_FASTAS[wildcards.sample]
 
 
 def sample_gff(wildcards):
-    if wildcards.sample == REFERENCE:
-        return REFERENCE_GFF
-    if ANNOTATION_MODE == "provided":
-        return (TARGETS[wildcards.sample].get("gff") or "").strip()
-    return f"{RESULTS}/liftoff/{wildcards.sample}/{wildcards.sample}.liftoff.gff3"
-
-
-def target_gff(sample):
-    if ANNOTATION_MODE == "provided":
-        return (TARGETS[sample].get("gff") or "").strip()
-    return f"{RESULTS}/liftoff/{sample}/{sample}.liftoff.gff3"
+    return SAMPLE_GFFS[wildcards.sample]
 
 
 rule all:
@@ -241,15 +265,12 @@ rule liftoff:
         reference_db=LIFTOFF_REFERENCE_DB,
         feature_types=LIFTOFF_FEATURE_TYPES,
     output:
-        gff=f"{RESULTS}/liftoff/{{sample}}/{{sample}}.liftoff.gff3",
+        gff=f"{RESULTS}/liftoff/{{sample}}.liftoff.gff3",
     params:
         intermediate=f"{WORK}/liftoff/{{sample}}/intermediate_files_{{sample}}",
         executable=LIFTOFF_BIN,
     threads:
         LIFTOFF_CONFIG["threads"]
-    resources:
-        mem_mb=config["resources"]["liftoff_mem_mb"],
-        runtime=config["resources"]["liftoff_runtime_min"],
     log:
         f"{LOGS}/liftoff/{{sample}}.log",
     wildcard_constraints:
@@ -280,15 +301,19 @@ rule gffread_proteins:
         fasta=sample_fasta,
         gff=sample_gff,
     output:
-        f"{WORK}/{{sample}}/{{sample}}_raw_protein.faa",
+        proteins=f"{WORK}/{{sample}}/{{sample}}_raw_protein.faa",
+        fasta_index=f"{WORK}/{{sample}}/genome.fa.fai",
     log:
         f"{LOGS}/gffread/{{sample}}.log",
     params:
         executable=GFFREAD_BIN,
+        fasta=lambda wc: f"{WORK}/{wc.sample}/genome.fa",
     shell:
         """
-        mkdir -p $(dirname {output}) $(dirname {log})
-        {params.executable} {input.gff} -g {input.fasta} -y {output} > {log} 2>&1
+        mkdir -p $(dirname {output.proteins}) $(dirname {log})
+        ln -sfn {input.fasta:q} {params.fasta:q}
+        python -m pantag.fasta --fasta {input.fasta:q} --index {output.fasta_index:q}
+        {params.executable} {input.gff:q} -g {params.fasta:q} -y {output.proteins:q} > {log:q} 2>&1
         """
 
 
@@ -344,15 +369,11 @@ rule single_sample_tag:
         identity=config["tag"]["blastp_identity"],
         query_coverage=config["tag"]["blastp_query_coverage"],
         subject_coverage=config["tag"]["blastp_subject_coverage"],
-        family_strategy=config["tag"]["family_merge_strategy"],
-        family_regex=config["tag"]["family_merge_regex"],
+        max_target_seqs=config["tag"]["diamond_max_target_seqs"],
         diamond=DIAMOND_BIN,
         flank_genes=FLANK_CONFIG["gene_count"],
     threads:
         config["tag"]["diamond_threads"]
-    resources:
-        mem_mb=config["resources"]["single_sample_mem_mb"],
-        runtime=config["resources"]["single_sample_runtime_min"],
     log:
         f"{LOGS}/single_sample_tag/{{sample}}.log",
     shell:
@@ -375,8 +396,7 @@ rule single_sample_tag:
           --min-identity {params.identity} \
           --min-query-coverage {params.query_coverage} \
           --min-subject-coverage {params.subject_coverage} \
-          --family-merge-strategy {params.family_strategy} \
-          --family-merge-regex '{params.family_regex}' \
+          --max-target-seqs {params.max_target_seqs} \
           --output-blast-raw {output.blast_raw} \
           --output-blast {output.blast} \
           --output-tandem {output.tandem} \
@@ -408,9 +428,6 @@ rule retrieve_pseudogenes:
         diamond=DIAMOND_BIN,
     threads:
         config["tag"]["diamond_threads"]
-    resources:
-        mem_mb=config["resources"]["pseudogene_mem_mb"],
-        runtime=config["resources"]["pseudogene_runtime_min"],
     log:
         f"{LOGS}/retrieve_pseudogenes/{{sample}}.log",
     shell:
@@ -453,9 +470,6 @@ rule merge:
             if config["merge"]["require_same_seqid"]
             else ""
         ),
-    resources:
-        mem_mb=config["resources"]["merge_mem_mb"],
-        runtime=config["resources"]["merge_runtime_min"],
     log:
         f"{LOGS}/merge.log",
     shell:
@@ -472,26 +486,6 @@ rule merge:
         """
 
 
-rule fasta_indexes:
-    input:
-        FASTA_FILES,
-    output:
-        FASTA_INDEXES,
-    resources:
-        mem_mb=config["resources"]["fasta_index_mem_mb"],
-        runtime=config["resources"]["fasta_index_runtime_min"],
-    log:
-        f"{LOGS}/fasta_index.log",
-    shell:
-        """
-        mkdir -p $(dirname {log}) $(dirname {output[0]})
-        python -m pantag.fasta \
-          --fasta {input:q} \
-          --index {output:q} \
-          > {log} 2>&1
-        """
-
-
 rule refine:
     input:
         config=lambda wc: workflow.configfiles[0],
@@ -501,11 +495,11 @@ rule refine:
         reference_gff=REFERENCE_GFF,
         target_fastas=[TARGETS[sample]["fasta"] for sample in TARGETS],
         fasta_indexes=FASTA_INDEXES,
-        target_gffs=[target_gff(sample) for sample in TARGETS],
+        target_gffs=[SAMPLE_GFFS[sample] for sample in TARGETS],
     output:
         tags=f"{RESULTS}/global/pangenome_TAGs.tsv",
         matrix=f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
-        manifest=f"{DOWNSTREAM}/TAG_sequence_manifest.tsv",
+        manifest=f"{DOWNSTREAM_WORK}/TAG_sequence_manifest.tsv",
         id_map=f"{WORK}/global/refined_cluster_id_map.tsv",
         span_audit=f"{WORK}/global/span_removed_clusters.tsv",
     params:
@@ -515,9 +509,6 @@ rule refine:
         flank_overlap_threshold=REFINE_FLANK_THRESHOLD,
     threads:
         REFINE_CONFIG["threads"]
-    resources:
-        mem_mb=config["resources"]["refine_mem_mb"],
-        runtime=config["resources"]["refine_runtime_min"],
     log:
         f"{LOGS}/refine.log",
     shell:
@@ -547,17 +538,19 @@ rule refine:
 
 checkpoint downstream_extract:
     input:
-        manifest=f"{DOWNSTREAM}/TAG_sequence_manifest.tsv",
+        manifest=f"{DOWNSTREAM_WORK}/TAG_sequence_manifest.tsv",
         matrix=f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
         samples=SAMPLES_FILE,
         reference_fasta=REFERENCE_FASTA,
         target_fastas=[TARGETS[sample]["fasta"] for sample in TARGETS],
+        fasta_indexes=FASTA_INDEXES,
     output:
-        fastas=directory(f"{DOWNSTREAM}/sequences/per_TAG"),
-        records=f"{DOWNSTREAM}/sequences/sequence_records.tsv",
-    resources:
-        mem_mb=config["resources"]["downstream_extract_mem_mb"],
-        runtime=config["resources"]["downstream_extract_runtime_min"],
+        fastas=directory(f"{DOWNSTREAM_WORK}/sequences/per_TAG"),
+        records=f"{DOWNSTREAM_WORK}/sequences/sequence_records.tsv",
+    threads:
+        EXTRACT_CONFIG["threads"]
+    params:
+        tag_args=" ".join(f"--tag {tag}" for tag in RUNTIME_DOWNSTREAM_TARGETS),
     log:
         f"{LOGS}/downstream/extract.log",
     shell:
@@ -569,57 +562,136 @@ checkpoint downstream_extract:
           --samples {input.samples} \
           --reference-sample {REFERENCE} \
           --reference-fasta {input.reference_fasta} \
+          --fasta-indexes {input.fasta_indexes:q} {params.tag_args} \
+          --threads {threads} \
           --output-dir {output.fastas} \
           --output-records {output.records} \
           > {log} 2>&1
         """
 
 
-rule downstream_sequences:
-    input:
-        f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
-        f"{DOWNSTREAM}/TAG_sequence_manifest.tsv",
-        f"{DOWNSTREAM}/sequences/per_TAG",
-        f"{DOWNSTREAM}/sequences/sequence_records.tsv",
-
-
-def downstream_tag_ids(wildcards):
+def selected_tags(wildcards):
+    """Return explicit targets, or discover all targets after extraction."""
+    if not RUNTIME_DOWNSTREAM_ALL:
+        return RUNTIME_DOWNSTREAM_TARGETS
+    matrix = Path(f"{RESULTS}/global/refined_TAG_count_matrix.tsv")
+    if matrix.is_file():
+        with matrix.open(encoding="utf-8", newline="") as handle:
+            return [row["global_tag_id"] for row in csv.DictReader(handle, delimiter="\t")]
     extraction = checkpoints.downstream_extract.get()
     pattern = os.path.join(str(extraction.output.fastas), "{global_tag}.fa")
     return sorted(glob_wildcards(pattern).global_tag)
 
 
-def downstream_cluster_summaries(wildcards):
+def extracted_sequence(wildcards):
+    """Wait for extraction only when a published sequence is missing."""
+    extraction = checkpoints.downstream_extract.get()
+    return os.path.join(str(extraction.output.fastas), f"{wildcards.global_tag}.fa")
+
+
+def missing_published_sequence(wildcards):
+    path = Path(f"{DOWNSTREAM}/{wildcards.global_tag}/sequences/{wildcards.global_tag}_sequences.fa")
+    return [] if path.is_file() else [str(path)]
+
+
+def selected_cluster_summaries(wildcards):
     return expand(
-        f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/summary.tsv",
-        global_tag=downstream_tag_ids(wildcards),
+        f"{DOWNSTREAM_WORK}/clusters/{{global_tag}}/summary.tsv",
+        global_tag=selected_tags(wildcards),
     )
+
+
+checkpoint selected_clusters_ready:
+    input:
+        selected_cluster_summaries,
+    output:
+        touch(f"{DOWNSTREAM_WORK}/clusters/.selection_{DOWNSTREAM_SELECTION_ID}.ready"),
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        touch {output}
+        """
+
+
+def selected_clusters_ready_output(wildcards):
+    """Wait for this run's selected clusters without scheduling older clusters."""
+    return checkpoints.selected_clusters_ready.get().output[0]
+
+
+def existing_cluster_summaries(wildcards):
+    """List completed summaries for cumulative merging, not as DAG dependencies."""
+    return sorted(
+        str(path)
+        for path in Path(f"{DOWNSTREAM_WORK}/clusters").glob("*/summary.tsv")
+    )
+
+
+def drawable_structure_outputs(wildcards):
+    checkpoints.selected_clusters_ready.get()
+    outputs = []
+    for tag in selected_tags(wildcards):
+        summary_path = Path(f"{DOWNSTREAM_WORK}/clusters/{tag}/summary.tsv")
+        coordinates_path = Path(f"{DOWNSTREAM}/{tag}/clusters/{tag}_pcoa_coordinates.tsv")
+        with summary_path.open(encoding="utf-8", newline="") as handle:
+            row = next(csv.DictReader(handle, delimiter="\t"), None)
+        if row and row.get("status") == "ok" and coordinates_path.is_file():
+            with coordinates_path.open(encoding="utf-8") as handle:
+                if sum(1 for _ in handle) > 1:
+                    outputs.append(f"{DOWNSTREAM}/{tag}/clusters/{tag}_TAG_structure.pdf")
+                    outputs.append(f"{DOWNSTREAM}/{tag}/clusters/{tag}_TAG_structure_collapsed.pdf")
+    return outputs
+
+
+def selected_sequence_outputs(wildcards):
+    return expand(
+        f"{DOWNSTREAM}/{{global_tag}}/sequences/{{global_tag}}_sequences.fa",
+        global_tag=selected_tags(wildcards),
+    )
+
+
+rule downstream_publish_sequence:
+    input:
+        extracted_sequence,
+    output:
+        f"{DOWNSTREAM}/{{global_tag}}/sequences/{{global_tag}}_sequences.fa",
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        cp {input:q} {output:q}
+        """
+
+
+rule downstream_sequences:
+    input:
+        selected_sequence_outputs,
 
 
 rule downstream_cluster_tag:
     input:
-        fasta=f"{DOWNSTREAM}/sequences/per_TAG/{{global_tag}}.fa",
-        records=f"{DOWNSTREAM}/sequences/sequence_records.tsv",
+        sequence_ready=missing_published_sequence,
+        records=f"{DOWNSTREAM_WORK}/TAG_sequence_manifest.tsv",
     output:
-        assignments=f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/assignments.tsv",
-        cross_table=f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/cluster_gene_sample_counts.tsv",
-        summary=f"{DOWNSTREAM}/clusters/per_TAG/{{global_tag}}/summary.tsv",
+        summary=f"{DOWNSTREAM_WORK}/clusters/{{global_tag}}/summary.tsv",
+        coordinates=f"{DOWNSTREAM}/{{global_tag}}/clusters/{{global_tag}}_pcoa_coordinates.tsv",
+        pcoa=CLUSTER_PCOA_PATTERN,
     params:
+        fasta=lambda wc: f"{DOWNSTREAM}/{wc.global_tag}/sequences/{wc.global_tag}_sequences.fa",
         k=CLUSTER_CONFIG["k"],
         ubiquitous=CLUSTER_CONFIG["ubiquitous_threshold"],
         max_clusters=CLUSTER_CONFIG["max_clusters"],
+        silhouette_tolerance=CLUSTER_CONFIG["silhouette_tolerance"],
         min_sequences=CLUSTER_CONFIG["min_sequences"],
         seed=CLUSTER_CONFIG["seed"],
         jitter=CLUSTER_CONFIG["pcoa_jitter_frac"],
         point_size=CLUSTER_CONFIG["pcoa_point_size"],
         alpha=CLUSTER_CONFIG["pcoa_alpha"],
         pcoa_arg=lambda wc: (
-            f"--pcoa {DOWNSTREAM}/clusters/per_TAG/{wc.global_tag}/pcoa.pdf"
-            if CLUSTER_CONFIG["pcoa"] else ""
+            f"--pcoa {DOWNSTREAM}/{wc.global_tag}/clusters/{wc.global_tag}_pcoa.pdf"
+            if PCOA_ENABLED else ""
         ),
-    resources:
-        mem_mb=config["resources"]["downstream_cluster_mem_mb"],
-        runtime=config["resources"]["downstream_cluster_runtime_min"],
+        pcoa_finalize="true" if PCOA_ENABLED else "touch",
+    threads:
+        CLUSTER_CONFIG["threads"]
     log:
         f"{LOGS}/downstream/cluster/{{global_tag}}.log",
     wildcard_constraints:
@@ -629,36 +701,129 @@ rule downstream_cluster_tag:
         mkdir -p $(dirname {output.summary}) $(dirname {log})
         python -m pantag.downstream.cluster run \
           --global-tag-id {wildcards.global_tag} \
-          --fasta {input.fasta} \
+          --fasta {params.fasta:q} \
           --records {input.records} \
-          --assignments {output.assignments} \
-          --cross-table {output.cross_table} \
           --summary {output.summary} \
+          --pcoa-coordinates {output.coordinates} \
           {params.pcoa_arg} \
           --k {params.k} \
           --ubiquitous-threshold {params.ubiquitous} \
           --max-clusters {params.max_clusters} \
+          --silhouette-tolerance {params.silhouette_tolerance} \
           --min-sequences {params.min_sequences} \
           --seed {params.seed} \
           --pcoa-jitter-frac {params.jitter} \
           --pcoa-point-size {params.point_size} \
           --pcoa-alpha {params.alpha} \
+          --threads {threads} \
+          > {log} 2>&1
+        {params.pcoa_finalize} {output.pcoa:q}
+        """
+
+
+rule build_structure_gene_index:
+    input:
+        samples=SAMPLES_FILE,
+        config=CONFIG_PATH,
+        gffs=list(SAMPLE_GFFS.values()),
+    output:
+        STRUCTURE_GENE_INDEX,
+    threads:
+        workflow.cores
+    log:
+        f"{LOGS}/downstream/structure_index.log",
+    shell:
+        """
+        mkdir -p $(dirname {output}) $(dirname {log})
+        python -m pantag.downstream.structure index \
+          --samples {input.samples} \
+          --config {input.config} \
+          --run-dir {LAUNCH_DIR} \
+          --liftoff-dir {RESULTS}/liftoff \
+          --threads {threads} \
+          --output {output} \
+          > {log} 2>&1
+        """
+
+
+rule downstream_structure_tag:
+    input:
+        summary=f"{DOWNSTREAM_WORK}/clusters/{{global_tag}}/summary.tsv",
+        coordinates=f"{DOWNSTREAM}/{{global_tag}}/clusters/{{global_tag}}_pcoa_coordinates.tsv",
+        gene_index=STRUCTURE_GENE_INDEX,
+        matrix=f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
+        samples=SAMPLES_FILE,
+        config=CONFIG_PATH,
+    output:
+        f"{DOWNSTREAM}/{{global_tag}}/clusters/{{global_tag}}_TAG_structure.pdf",
+    log:
+        f"{LOGS}/downstream/structure/{{global_tag}}.log",
+    wildcard_constraints:
+        global_tag="[A-Za-z0-9_.-]+",
+    shell:
+        """
+        mkdir -p $(dirname {output}) $(dirname {log})
+        python -m pantag.downstream.structure \
+          --global-tag-id {wildcards.global_tag} \
+          --matrix {input.matrix} \
+          --coordinates {input.coordinates} \
+          --gene-index {input.gene_index} \
+          --samples {input.samples} \
+          --config {input.config} \
+          --run-dir {LAUNCH_DIR} \
+          --liftoff-dir {RESULTS}/liftoff \
+          --output {output} \
+          > {log} 2>&1
+        """
+
+
+rule downstream_structure_collapsed_tag:
+    input:
+        summary=f"{DOWNSTREAM_WORK}/clusters/{{global_tag}}/summary.tsv",
+        coordinates=f"{DOWNSTREAM}/{{global_tag}}/clusters/{{global_tag}}_pcoa_coordinates.tsv",
+        gene_index=STRUCTURE_GENE_INDEX,
+        matrix=f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
+        samples=SAMPLES_FILE,
+        config=CONFIG_PATH,
+    output:
+        collapsed=f"{DOWNSTREAM}/{{global_tag}}/clusters/{{global_tag}}_TAG_structure_collapsed.pdf",
+        compositions=f"{DOWNSTREAM_WORK}/clusters/{{global_tag}}/TAG_compositions.tsv",
+    log:
+        f"{LOGS}/downstream/structure_collapsed/{{global_tag}}.log",
+    wildcard_constraints:
+        global_tag="[A-Za-z0-9_.-]+",
+    shell:
+        """
+        mkdir -p $(dirname {output.collapsed}) $(dirname {output.compositions}) $(dirname {log})
+        python -m pantag.downstream.structure \
+          --global-tag-id {wildcards.global_tag} \
+          --matrix {input.matrix} \
+          --coordinates {input.coordinates} \
+          --gene-index {input.gene_index} \
+          --samples {input.samples} \
+          --config {input.config} \
+          --run-dir {LAUNCH_DIR} \
+          --liftoff-dir {RESULTS}/liftoff \
+          --collapsed-output {output.collapsed} \
+          --compositions-output {output.compositions} \
           > {log} 2>&1
         """
 
 
 rule downstream_cluster_summary:
     input:
-        downstream_cluster_summaries,
+        ready=selected_clusters_ready_output,
     output:
-        f"{DOWNSTREAM}/clusters/global_cluster_summary.tsv",
+        f"{DOWNSTREAM}/global_cluster_summary.tsv",
+    params:
+        summaries=existing_cluster_summaries,
     log:
         f"{LOGS}/downstream/cluster_summary.log",
     shell:
         """
         mkdir -p $(dirname {output}) $(dirname {log})
         python -m pantag.downstream.cluster merge \
-          --inputs {input} \
+          --inputs {params.summaries:q} \
           --output {output} \
           > {log} 2>&1
         """
@@ -666,9 +831,11 @@ rule downstream_cluster_summary:
 
 rule downstream_cluster:
     input:
-        f"{DOWNSTREAM}/clusters/global_cluster_summary.tsv",
+        summary=f"{DOWNSTREAM}/global_cluster_summary.tsv",
+        structures=drawable_structure_outputs,
 
 
 rule downstream_all:
     input:
-        f"{DOWNSTREAM}/clusters/global_cluster_summary.tsv",
+        summary=f"{DOWNSTREAM}/global_cluster_summary.tsv",
+        structures=drawable_structure_outputs,

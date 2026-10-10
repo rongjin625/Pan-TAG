@@ -22,13 +22,6 @@ dependencies = [
 
 [project.scripts]
 pantag = "pantag.cli:main"
-pantag-prepare = "pantag.prepare:main"
-pantag-single-sample-tag = "pantag.single_sample_tag:main"
-pantag-retrieve-pseudogenes = "pantag.retrieve_pseudogenes:main"
-pantag-merge = "pantag.merge:main"
-pantag-refine = "pantag.refine:main"
-pantag-downstream-extract = "pantag.downstream.extract:main"
-pantag-downstream-cluster = "pantag.downstream.cluster:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

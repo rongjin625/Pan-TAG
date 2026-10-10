@@ -17,7 +17,14 @@ from pathlib import Path
 
 import pysam
 
-from pantag.gff import AnnotationSchema, gene_id, gene_name, load_schema, parse_attributes
+from pantag.gff import (
+    AnnotationSchema,
+    gene_id,
+    gene_name,
+    is_pseudogene,
+    load_schema,
+    parse_attributes,
+)
 
 
 class RefineError(RuntimeError):
@@ -159,7 +166,7 @@ def read_samples(
             gff = (
                 reference_gff if sample == reference_id else
                 supplied_gff if annotation_mode == "provided" else
-                str(Path(target_gff_dir) / sample / f"{sample}.liftoff.gff3")
+                str(Path(target_gff_dir) / f"{sample}.liftoff.gff3")
             )
             fasta = reference_fasta if sample == reference_id else (row.get("fasta") or "").strip()
             assets.append(SampleAsset(sample, fasta, gff))
@@ -182,13 +189,25 @@ def initialize_worker(gene_map, flank_map, flank_count, threshold, schema) -> No
 
 def read_gff_once(path: str, schema: AnnotationSchema, gene_map):
     chrom_genes: dict[str, list[GeneLite]] = defaultdict(list)
-    allowed = {value.lower() for value in schema.gene_feature_types}
+    gene_features = {value.lower() for value in schema.gene_feature_types}
+    pseudogene_features = {
+        value.lower() for value in schema.pseudogene_feature_types
+    }
     with Path(path).open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip() or line.startswith("#"):
                 continue
             parts = line.rstrip("\n").split("\t")
-            if len(parts) < 9 or parts[2].lower() not in allowed:
+            if len(parts) < 9:
+                continue
+            feature_type = parts[2].lower()
+            attrs = parse_attributes(parts[8])
+            is_gene_feature = feature_type in gene_features
+            is_confirmed_pseudogene = (
+                feature_type in pseudogene_features
+                and is_pseudogene(attrs, schema)
+            )
+            if not (is_gene_feature or is_confirmed_pseudogene):
                 continue
             try:
                 start, end = int(parts[3]), int(parts[4])
@@ -196,7 +215,6 @@ def read_gff_once(path: str, schema: AnnotationSchema, gene_map):
                 raise RefineError(f"{path}:{line_number}: invalid gene coordinates") from exc
             if start < 1 or end < start:
                 raise RefineError(f"{path}:{line_number}: invalid gene interval {start}-{end}")
-            attrs = parse_attributes(parts[8])
             identifier = gene_id(attrs, schema)
             name, _ = gene_name(attrs, schema, identifier)
             cleaned = clean_name(name)
