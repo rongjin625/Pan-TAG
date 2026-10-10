@@ -1,10 +1,12 @@
-"""Generate a validated Pan-TAG configuration from one samples.tsv."""
+"""Configure Pan-TAG and run selected downstream workflows."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -138,14 +140,13 @@ OVERRIDES: dict[str, tuple[str, ...]] = {
     "pseudogene_values": ("annotation", "pseudogene_values"),
     "strip_id_prefixes": ("annotation", "strip_id_prefixes"),
     "fallback_gene_name_to_id": ("annotation", "fallback_gene_name_to_id"),
-    "liftoff_feature_types": ("liftoff", "feature_types"),
     "liftoff_environment": ("liftoff", "pixi_environment"),
     "liftoff_bin": ("liftoff", "executable"), "liftoff_threads": ("liftoff", "threads"),
-    "diamond_threads": ("tag", "diamond_threads"), "blastp_identity": ("tag", "blastp_identity"),
+    "diamond_threads": ("tag", "diamond_threads"),
+    "diamond_max_target_seqs": ("tag", "diamond_max_target_seqs"),
+    "blastp_identity": ("tag", "blastp_identity"),
     "blastp_query_coverage": ("tag", "blastp_query_coverage"),
     "blastp_subject_coverage": ("tag", "blastp_subject_coverage"),
-    "family_merge_strategy": ("tag", "family_merge_strategy"),
-    "family_merge_regex": ("tag", "family_merge_regex"),
     "pseudogene_enabled": ("pseudogene", "enabled"),
     "pseudogene_flank_bp": ("pseudogene", "search_flank_bp"),
     "blastx_identity": ("pseudogene", "blastx_identity"),
@@ -156,9 +157,12 @@ OVERRIDES: dict[str, tuple[str, ...]] = {
     "require_same_seqid": ("merge", "require_same_seqid"), "debug_outputs": ("outputs", "debug"),
     "refine_threads": ("refine", "threads"),
     "flank_overlap_threshold": ("refine", "flank_overlap_threshold"),
+    "extract_threads": ("downstream", "extract", "threads"),
+    "cluster_threads": ("downstream", "cluster", "threads"),
     "cluster_k": ("downstream", "cluster", "k"),
     "ubiquitous_threshold": ("downstream", "cluster", "ubiquitous_threshold"),
     "max_clusters": ("downstream", "cluster", "max_clusters"),
+    "silhouette_tolerance": ("downstream", "cluster", "silhouette_tolerance"),
     "min_sequences": ("downstream", "cluster", "min_sequences"),
     "pcoa": ("downstream", "cluster", "pcoa"), "seed": ("downstream", "cluster", "seed"),
     "pcoa_jitter_frac": ("downstream", "cluster", "pcoa_jitter_frac"),
@@ -193,6 +197,9 @@ def configure(args: argparse.Namespace) -> Path:
     config["reference"] = {"sample_id": reference["sample_id"], "fasta": reference["fasta"], "gff": reference["gff"]}
     config["samples"] = str(samples_path)
     set_nested(config, ("annotation", "mode"), annotation_mode)
+    liftoff_config = config.get("liftoff")
+    if isinstance(liftoff_config, dict):
+        liftoff_config.pop("feature_types", None)
     for destination, path in OVERRIDES.items():
         value = getattr(args, destination, None)
         if value is not None:
@@ -228,27 +235,35 @@ def configure(args: argparse.Namespace) -> Path:
             )
         annotation[key] = configured
 
-    if annotation_mode == "liftoff":
-        feature_types = str(config["liftoff"]["feature_types"])
-        if not feature_types or not Path(feature_types).is_file():
-            raise ConfigureError(
-                f"--liftoff-feature-types must identify an existing file, got {feature_types!r}"
-            )
-    if config["tag"]["family_merge_strategy"] == "regex" and not config["tag"]["family_merge_regex"]:
-        raise ConfigureError("--family-merge-regex is required when --family-merge-strategy regex")
+    tag = config.get("tag")
+    if not isinstance(tag, dict) or "diamond_max_target_seqs" not in tag:
+        raise ConfigureError(
+            "template is missing required config value: tag.diamond_max_target_seqs"
+        )
+
     try:
         refine_threshold = float(config["refine"]["flank_overlap_threshold"])
     except (TypeError, ValueError) as error:
         raise ConfigureError("refine.flank_overlap_threshold must be a number from 0 to 1") from error
     if not 0 <= refine_threshold <= 1:
         raise ConfigureError("refine.flank_overlap_threshold must be between 0 and 1")
-    family_regex = str(config["tag"]["family_merge_regex"])
-    if family_regex:
-        try:
-            re.compile(family_regex)
-        except re.error as error:
-            raise ConfigureError(f"--family-merge-regex is invalid: {error}") from error
-
+    for path, label in (
+        (("tag", "diamond_max_target_seqs"), "tag.diamond_max_target_seqs"),
+        (("downstream", "extract", "threads"), "downstream.extract.threads"),
+        (("downstream", "cluster", "threads"), "downstream.cluster.threads"),
+    ):
+        value = nested_value(config, path)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigureError(f"{label} must be a positive integer")
+    tolerance = nested_value(config, ("downstream", "cluster", "silhouette_tolerance"))
+    if (
+        not isinstance(tolerance, (int, float))
+        or isinstance(tolerance, bool)
+        or not 0 <= tolerance <= 1
+    ):
+        raise ConfigureError(
+            "downstream.cluster.silhouette_tolerance must be between 0 and 1"
+        )
     directories = [
         str(config[key]).strip()
         for key in ("results_dir", "logs_dir", "work_dir")
@@ -313,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
             loaded = yaml.safe_load(handle) or {}
             if isinstance(loaded, dict):
                 default_config = loaded
-    parser = argparse.ArgumentParser(prog="pantag", description=__doc__)
+    parser = argparse.ArgumentParser(prog="pantag configure", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
 
     inputs = parser.add_argument_group("Input and sample options")
@@ -347,7 +362,6 @@ def build_parser() -> argparse.ArgumentParser:
         annotation.add_argument(option, dest=destination, type=comma_list, help=description)
     annotation.add_argument("--coding-filter-mode", choices=("auto", "biotype", "translated_protein"), help="Coding-gene filter strategy")
     add_bool(annotation, "--fallback-gene-name-to-id", "fallback_gene_name_to_id", "Use gene ID when gene name is absent")
-    annotation.add_argument("--liftoff-feature-types", help="Liftoff -f feature list")
     annotation.add_argument("--liftoff-environment", help="Pixi environment containing Liftoff")
     annotation.add_argument("--liftoff-bin", help="Liftoff executable name or path")
     annotation.add_argument("--liftoff-threads", type=positive_int, help="Threads per Liftoff job")
@@ -356,11 +370,10 @@ def build_parser() -> argparse.ArgumentParser:
     software.add_argument("--diamond-bin", help="DIAMOND executable name or path")
     software.add_argument("--gffread-bin", help="gffread executable name or path")
     software.add_argument("--diamond-threads", type=positive_int, help="Threads per DIAMOND job")
+    software.add_argument("--diamond-max-target-seqs", type=positive_int, help="Maximum non-self DIAMOND targets reported per query")
     software.add_argument("--blastp-identity", type=percentage, help="Minimum blastp identity percentage")
     software.add_argument("--blastp-query-coverage", type=percentage, help="Minimum blastp query coverage percentage")
     software.add_argument("--blastp-subject-coverage", type=percentage, help="Minimum blastp subject coverage percentage")
-    software.add_argument("--family-merge-strategy", choices=("none", "first_digit_prefix", "regex"), help="Adjacent-family merge strategy")
-    software.add_argument("--family-merge-regex", help="Regex used by family merge strategy")
 
     pseudo = parser.add_argument_group("Pseudogene and flank options")
     pseudo.add_argument(
@@ -385,9 +398,12 @@ def build_parser() -> argparse.ArgumentParser:
     refinement.add_argument("--flank-overlap-threshold", type=fraction, help="Minimum fraction of a candidate block's sample flanks matching global flanks")
 
     downstream = parser.add_argument_group("Optional downstream options")
+    downstream.add_argument("--extract-threads", type=positive_int, help="Concurrent sample FASTA workers for sequence extraction")
+    downstream.add_argument("--cluster-threads", type=positive_int, help="Workers for k-mer generation within each Pan-cluster")
     downstream.add_argument("--cluster-k", type=positive_int, help="k-mer length")
     downstream.add_argument("--ubiquitous-threshold", type=fraction, help="Ubiquitous k-mer frequency threshold")
     downstream.add_argument("--max-clusters", type=nonnegative_int, help="Maximum clusters; 0 selects automatically")
+    downstream.add_argument("--silhouette-tolerance", type=fraction, help="Allowed loss from the best silhouette when preferring fewer groups")
     downstream.add_argument("--min-sequences", type=positive_int, help="Minimum sequences needed for clustering")
     add_bool(downstream, "--pcoa", "pcoa", "Generate PCoA output")
     downstream.add_argument("--seed", type=int, help="Random seed")
@@ -396,6 +412,105 @@ def build_parser() -> argparse.ArgumentParser:
     downstream.add_argument("--pcoa-alpha", type=fraction, help="PCoA point alpha")
 
     append_config_defaults(parser, default_config)
+    return parser
+
+
+def build_downstream_parser(command: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=f"pantag {command}",
+        description=(
+            "Extract sequences for selected or all Pan-clusters."
+            if command == "extract"
+            else "Run sequence clustering for selected or all Pan-clusters."
+        ),
+    )
+    parser.add_argument("--config", required=True, help="Run-specific config.yaml")
+    targets = parser.add_mutually_exclusive_group(required=True)
+    targets.add_argument(
+        "--tag", action="append", dest="tags", metavar="GLOBAL_TAG_ID",
+        help="Pan-cluster to process; repeat this option for multiple TAGs",
+    )
+    targets.add_argument("--all", action="store_true", dest="all_tags", help="Process all Pan-clusters")
+    parser.add_argument("--cores", type=positive_int, required=True, help="Total Snakemake cores")
+    parser.add_argument(
+        "--dry-run", "-n", action="store_true",
+        help="Show the jobs Snakemake would run without executing them",
+    )
+    parser.add_argument(
+        "--printshellcmds", "-p", action="store_true",
+        help="Print shell commands for scheduled jobs",
+    )
+    return parser
+
+
+def build_extract_parser() -> argparse.ArgumentParser:
+    return build_downstream_parser("extract")
+
+
+def build_cluster_parser() -> argparse.ArgumentParser:
+    return build_downstream_parser("cluster")
+
+
+def run_downstream(args: argparse.Namespace, target: str) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.is_file():
+        raise ConfigureError(f"--config file does not exist: {config_path}")
+    project_root = Path(__file__).resolve().parents[2]
+    snakefile = project_root / "workflow" / "Snakefile"
+    if not snakefile.is_file():
+        raise ConfigureError(f"Pan-TAG Snakefile does not exist: {snakefile}")
+    snakemake = shutil.which("snakemake")
+    if not snakemake:
+        raise ConfigureError("snakemake is not available in the current Pixi environment")
+    tags = list(dict.fromkeys(args.tags or []))
+    invalid = [tag for tag in tags if not re.fullmatch(r"[A-Za-z0-9_.-]+", tag)]
+    if invalid:
+        raise ConfigureError(
+            "Invalid Pan-cluster ID(s): " + ", ".join(invalid)
+        )
+    runtime_targets = "__ALL__" if args.all_tags else ",".join(tags)
+    command = [
+        snakemake, target,
+        "--directory", str(Path.cwd().resolve()),
+        "--snakefile", str(snakefile),
+        "--configfile", str(config_path),
+        "--cores", str(args.cores),
+        "--rerun-incomplete",
+        "--config",
+        f"_pantag_downstream_targets={runtime_targets}",
+    ]
+    if target == "downstream_cluster":
+        command[command.index("--config"):command.index("--config")] = [
+            "--allowed-rules",
+            "downstream_extract",
+            "downstream_publish_sequence",
+            "selected_clusters_ready",
+            "downstream_cluster_tag",
+            "build_structure_gene_index",
+            "downstream_structure_tag",
+            "downstream_structure_collapsed_tag",
+            "downstream_cluster_summary",
+            "downstream_cluster",
+        ]
+    if getattr(args, "dry_run", False):
+        command.append("--dry-run")
+    if getattr(args, "printshellcmds", False):
+        command.append("--printshellcmds")
+    return subprocess.run(command, check=False).returncode
+
+
+def run_extract(args: argparse.Namespace) -> int:
+    return run_downstream(args, "downstream_sequences")
+
+
+def run_cluster(args: argparse.Namespace) -> int:
+    return run_downstream(args, "downstream_cluster")
+
+
+def build_root_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="pantag", description=__doc__)
+    parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument("command", nargs="?", choices=("configure", "extract", "cluster"))
     return parser
 
 
@@ -408,8 +523,24 @@ def nonnegative_int_or_float(value: str) -> float:
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw and raw[0] == "configure":
-        raw.pop(0)
+    if not raw or raw[0] in {"-h", "--help"}:
+        build_root_parser().print_help()
+        return 0
+    if raw[0] in {"extract", "cluster"}:
+        command = raw[0]
+        parser = build_extract_parser() if command == "extract" else build_cluster_parser()
+        args = parser.parse_args(raw[1:])
+        try:
+            return run_extract(args) if command == "extract" else run_cluster(args)
+        except (ConfigureError, OSError) as error:
+            parser.error(str(error))
+    if raw[0] == "configure":
+        raw = raw[1:]
+    elif raw[0] == "--version":
+        build_root_parser().parse_args(raw)
+        return 0
+    else:
+        build_root_parser().error(f"unknown command: {raw[0]}")
     parser = build_parser()
     args = parser.parse_args(raw)
     try:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import re
 import shutil
 import subprocess
 import sys
@@ -75,19 +74,6 @@ def filter_blastp(
     return retained
 
 
-def family_prefix(name: str, strategy: str, pattern: str) -> str:
-    if strategy == "none":
-        return str(name)
-    if strategy == "first_digit_prefix":
-        return re.split(r"\d", str(name))[0].rstrip("-")
-    if strategy == "regex":
-        match = re.search(pattern, str(name))
-        if match is None:
-            return str(name)
-        return match.group(1) if match.groups() else match.group(0)
-    raise SingleSampleTagError(f"Unknown family merge strategy: {strategy}")
-
-
 def format_member_names(ids: list[str], id_to_name: dict[str, str]) -> str:
     names = [id_to_name.get(gene_id, gene_id) for gene_id in ids]
     counts = Counter(names)
@@ -121,8 +107,6 @@ def build_clusters(
     tandem_file: str | Path,
     gene_map: str | Path,
     output_file: str | Path,
-    family_merge_strategy: str = "none",
-    family_merge_regex: str = "",
 ) -> int:
     """Build local TAGs using pipeline3's connected-component behavior."""
     id_to_name = load_gene_map(gene_map)
@@ -189,46 +173,9 @@ def build_clusters(
             }
         )
 
-    initial.sort(key=lambda cluster: (str(cluster["chrom"]), int(cluster["start"])))
-    final: list[dict[str, object]] = []
-    if initial:
-        current = initial[0]
-        for following in initial[1:]:
-            current_ids = list(current["ids"])
-            following_ids = list(following["ids"])
-            current_prefixes = {
-                family_prefix(
-                    id_to_name.get(gene_id, gene_id),
-                    family_merge_strategy,
-                    family_merge_regex,
-                )
-                for gene_id in current_ids
-            }
-            following_prefixes = {
-                family_prefix(
-                    id_to_name.get(gene_id, gene_id),
-                    family_merge_strategy,
-                    family_merge_regex,
-                )
-                for gene_id in following_ids
-            }
-            if (
-                current["chrom"] == following["chrom"]
-                and not current_prefixes.isdisjoint(following_prefixes)
-            ):
-                merged_ids = sorted(
-                    set(current_ids + following_ids),
-                    key=lambda gene_id: gene_coords[gene_id][1],
-                )
-                current["ids"] = merged_ids
-                current["start"] = min(
-                    int(current["start"]), int(following["start"])
-                )
-                current["end"] = max(int(current["end"]), int(following["end"]))
-            else:
-                final.append(current)
-                current = following
-        final.append(current)
+    final = sorted(
+        initial, key=lambda cluster: (str(cluster["chrom"]), int(cluster["start"]))
+    )
 
     output = ensure_parent(output_file)
     with output.open("w", encoding="utf-8", newline="") as handle:
@@ -328,7 +275,8 @@ def command_run(args: argparse.Namespace) -> int:
             "--max-hsps",
             "1",
             "--max-target-seqs",
-            "5",
+            str(args.max_target_seqs),
+            "--no-self-hits",
             "--threads",
             str(args.threads),
             "--quiet",
@@ -374,8 +322,6 @@ def command_run(args: argparse.Namespace) -> int:
         args.output_tandem,
         args.gene_map,
         args.output_cluster,
-        args.family_merge_strategy,
-        args.family_merge_regex,
     )
     if args.output_final:
         from .gff import load_schema
@@ -438,13 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-identity", type=float, required=True)
     parser.add_argument("--min-query-coverage", type=float, required=True)
     parser.add_argument("--min-subject-coverage", type=float, required=True)
+    parser.add_argument("--max-target-seqs", type=int, required=True)
     parser.add_argument("--diamond-bin", required=True)
-    parser.add_argument(
-        "--family-merge-strategy",
-        choices=("none", "first_digit_prefix", "regex"),
-        required=True,
-    )
-    parser.add_argument("--family-merge-regex", required=True)
     parser.add_argument("--output-blast-raw", required=True)
     parser.add_argument("--output-blast", required=True)
     parser.add_argument("--output-tandem", required=True)

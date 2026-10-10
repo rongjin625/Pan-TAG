@@ -110,6 +110,54 @@ class PublicSchemaTest(unittest.TestCase):
                 ["CODING"],
             )
 
+    def test_nested_genes_are_skipped_and_longest_outer_protein_is_retained(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.yaml"
+            write_annotation_config(config, mode="provided")
+            gff = root / "annotation.gff3"
+            gff.write_text(
+                "chr2\ttest\tgene\t100\t1000\t.\t+\t.\t"
+                "ID=OUTER;Name=Hoxd3;biotype=protein_coding\n"
+                "chr2\ttest\tmRNA\t100\t1000\t.\t+\t.\t"
+                "ID=OUTER_SHORT;Parent=OUTER\n"
+                "chr2\ttest\tmRNA\t100\t1000\t.\t+\t.\t"
+                "ID=OUTER_LONG;Parent=OUTER\n"
+                "chr2\ttest\tgene\t200\t800\t.\t+\t.\t"
+                "ID=INNER;Name=Hoxd4;biotype=protein_coding\n"
+                "chr2\ttest\tmRNA\t200\t800\t.\t+\t.\t"
+                "ID=INNER_TX;Parent=INNER\n",
+                encoding="utf-8",
+            )
+            proteins = root / "raw.faa"
+            proteins.write_text(
+                ">OUTER_SHORT\nMAAA\n"
+                ">OUTER_LONG\nMAAAAAAA\n"
+                ">INNER_TX\nMBBBBB\n",
+                encoding="utf-8",
+            )
+            outputs = {
+                name: root / name
+                for name in ("genes.gff", "map.tsv", "proteins.faa", "qc.tsv")
+            }
+            prepare.command_tag_inputs(argparse.Namespace(
+                sample_id="nested", config=str(config), annotation_gff=str(gff),
+                raw_proteins=str(proteins), output_mcscanx_gff=str(outputs["genes.gff"]),
+                output_gene_map=str(outputs["map.tsv"]), output_proteins=str(outputs["proteins.faa"]),
+                output_qc=str(outputs["qc.tsv"]),
+            ))
+
+            with outputs["map.tsv"].open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertEqual([row["Gene_ID"] for row in rows], ["OUTER"])
+            protein_text = outputs["proteins.faa"].read_text(encoding="utf-8")
+            self.assertEqual(protein_text.count(">OUTER"), 1)
+            self.assertIn("MAAAAAAA", protein_text)
+            self.assertNotIn(">INNER", protein_text)
+            qc_text = outputs["qc.tsv"].read_text(encoding="utf-8")
+            self.assertIn("retained_mcscanx_genes\t1", qc_text)
+            self.assertIn("nested_genes_skipped\t1", qc_text)
+
     def test_local_tag_qc_checks_the_complete_member_interval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -433,6 +481,37 @@ class PublicSchemaTest(unittest.TestCase):
             self.assertEqual(row["Upstream_5th_Gene"], "NAME1")
             self.assertEqual(row["Downstream_5th_Gene"], "NAME12")
             self.assertEqual(row["Length"], "150")
+
+    def test_disconnected_tandem_components_are_never_merged_by_gene_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mcscanx_gff = root / "sample.gff"
+            tandem = root / "sample.tandem"
+            gene_map = root / "sample.map"
+            output = root / "sample_gene.cluster"
+            mcscanx_gff.write_text(
+                "chr1\tgene1\t100\t149\n"
+                "chr1\tgene2\t200\t249\n"
+                "chr1\tgene3\t300\t349\n"
+                "chr1\tgene4\t400\t449\n",
+                encoding="utf-8",
+            )
+            tandem.write_text("gene1,gene2\ngene3,gene4\n", encoding="utf-8")
+            gene_map.write_text(
+                "Gene_ID\tGene_Name\n"
+                "gene1\tFAMILY1\n"
+                "gene2\tFAMILY2\n"
+                "gene3\tFAMILY3\n"
+                "gene4\tFAMILY4\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                single_sample_tag.build_clusters(
+                    mcscanx_gff, tandem, gene_map, output
+                ),
+                2,
+            )
 
     def test_final_metrics_include_pseudogenes_and_exclude_them_from_density(self) -> None:
         coordinates = {

@@ -5,10 +5,19 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
-from pantag.cli import ConfigureError, build_parser, configure
+from pantag.cli import (
+    ConfigureError,
+    build_cluster_parser,
+    build_extract_parser,
+    build_parser,
+    configure,
+    run_cluster,
+    run_extract,
+)
 
 
 class ConfigureCliTest(unittest.TestCase):
@@ -17,8 +26,6 @@ class ConfigureCliTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         for name in ("ref.fa", "ref.gff3", "sample.fa", "sample.gff3"):
             (self.root / name).write_text("test\n", encoding="utf-8")
-        self.features = self.root / "features.txt"
-        self.features.write_text("gene\n", encoding="utf-8")
         self.template = self.root / "template.yaml"
         template_config = yaml.safe_load(
             Path(__file__).with_name("config.yaml").read_text(encoding="utf-8")
@@ -28,7 +35,6 @@ class ConfigureCliTest(unittest.TestCase):
         }
         template_config["samples"] = "old.tsv"
         template_config["annotation"]["gene_id_keys"] = ["ID"]
-        template_config["liftoff"]["feature_types"] = str(self.features)
         self.template.write_text(
             yaml.safe_dump(template_config, sort_keys=False),
             encoding="utf-8",
@@ -112,9 +118,15 @@ class ConfigureCliTest(unittest.TestCase):
             configure(args)
 
     def test_configure_liftoff_accepts_empty_target_gff(self) -> None:
+        template = yaml.safe_load(self.template.read_text(encoding="utf-8"))
+        template["liftoff"]["feature_types"] = "legacy/custom/features.txt"
+        self.template.write_text(
+            yaml.safe_dump(template, sort_keys=False), encoding="utf-8"
+        )
         output = configure(self.args(self.write_samples(target_gff=False), "liftoff"))
         config = yaml.safe_load(output.read_text(encoding="utf-8"))
         self.assertEqual(config["annotation"]["mode"], "liftoff")
+        self.assertNotIn("feature_types", config["liftoff"])
 
     def test_configure_provided_rejects_missing_target_gff(self) -> None:
         with self.assertRaisesRegex(ConfigureError, "requires target GFFs"):
@@ -131,6 +143,7 @@ class ConfigureCliTest(unittest.TestCase):
             "--reference-sample", "REF",
             "--require-same-seqid",
             "--blastp-subject-coverage", "25",
+            "--diamond-max-target-seqs", "20",
             "--flank-overlap-threshold", "0.35",
             "--no-pseudogene-enabled",
             "--results-dir", "custom-results",
@@ -139,9 +152,93 @@ class ConfigureCliTest(unittest.TestCase):
         config = yaml.safe_load(output.read_text(encoding="utf-8"))
         self.assertTrue(config["merge"]["require_same_seqid"])
         self.assertEqual(config["tag"]["blastp_subject_coverage"], 25.0)
+        self.assertEqual(config["tag"]["diamond_max_target_seqs"], 20)
         self.assertEqual(config["refine"]["flank_overlap_threshold"], 0.35)
         self.assertFalse(config["pseudogene"]["enabled"])
         self.assertEqual(config["results_dir"], "custom-results")
+
+    def test_invalid_silhouette_tolerance_is_rejected(self) -> None:
+        config = yaml.safe_load(self.template.read_text(encoding="utf-8"))
+        config["downstream"]["cluster"]["silhouette_tolerance"] = 1.01
+        self.template.write_text(
+            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ConfigureError, "silhouette_tolerance"):
+            configure(self.args(self.write_samples(target_gff=True), "provided"))
+
+    def test_cluster_cli_requires_tags_or_all(self) -> None:
+        parser = build_cluster_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--config", "config.yaml", "--cores", "4"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args([
+                "--config", "config.yaml", "--cores", "4",
+                "--all", "--tag", "Pan_cluster_0001",
+            ])
+
+    def test_cluster_cli_passes_repeated_tags_to_snakemake(self) -> None:
+        config = self.root / "run.yaml"
+        config.write_text("test: true\n", encoding="utf-8")
+        args = build_cluster_parser().parse_args([
+            "--config", str(config), "--cores", "6",
+            "--tag", "Pan_cluster_0001", "--tag", "Pan_cluster_0003",
+        ])
+        with patch("pantag.cli.shutil.which", return_value="snakemake"), \
+             patch("pantag.cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(run_cluster(args), 0)
+        command = run.call_args.args[0]
+        self.assertIn("_pantag_downstream_targets=Pan_cluster_0001,Pan_cluster_0003", command)
+        self.assertFalse(any(item.startswith("_pantag_config_path=") for item in command))
+        self.assertIn("--rerun-incomplete", command)
+        self.assertNotIn("--allowed-rules", command)
+
+    def test_cluster_cli_all_is_runtime_only(self) -> None:
+        config = self.root / "run.yaml"
+        original = "test: true\n"
+        config.write_text(original, encoding="utf-8")
+        args = build_cluster_parser().parse_args([
+            "--config", str(config), "--cores", "3", "--all",
+        ])
+        with patch("pantag.cli.shutil.which", return_value="snakemake"), \
+             patch("pantag.cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(run_cluster(args), 0)
+        self.assertIn("_pantag_downstream_targets=__ALL__", run.call_args.args[0])
+        self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_extract_cli_uses_sequence_target_and_shared_tag_selection(self) -> None:
+        config = self.root / "run.yaml"
+        config.write_text("test: true\n", encoding="utf-8")
+        args = build_extract_parser().parse_args([
+            "--config", str(config), "--cores", "4",
+            "--tag", "Pan_cluster_0002", "--tag", "Pan_cluster_0002",
+            "--dry-run", "--printshellcmds",
+        ])
+        with patch("pantag.cli.shutil.which", return_value="snakemake"), \
+             patch("pantag.cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(run_extract(args), 0)
+        command = run.call_args.args[0]
+        self.assertEqual(command[1], "downstream_sequences")
+        self.assertIn("_pantag_downstream_targets=Pan_cluster_0002", command)
+        self.assertNotIn("--allowed-rules", command)
+        self.assertIn("--dry-run", command)
+        self.assertIn("--printshellcmds", command)
+
+    def test_cluster_cli_omits_dry_run_flags_by_default(self) -> None:
+        config = self.root / "run.yaml"
+        config.write_text("test: true\n", encoding="utf-8")
+        args = build_cluster_parser().parse_args([
+            "--config", str(config), "--cores", "2", "--all",
+        ])
+        with patch("pantag.cli.shutil.which", return_value="snakemake"), \
+             patch("pantag.cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(run_cluster(args), 0)
+        command = run.call_args.args[0]
+        self.assertNotIn("--dry-run", command)
+        self.assertNotIn("--printshellcmds", command)
 
     def test_help_shows_config_values_without_none_defaults(self) -> None:
         parser = build_parser()
@@ -171,6 +268,33 @@ class ConfigureCliTest(unittest.TestCase):
             yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
         )
         with self.assertRaisesRegex(ConfigureError, "must be between 0 and 1"):
+            configure(self.args(self.write_samples(target_gff=True), "provided"))
+
+    def test_invalid_extract_threads_are_rejected(self) -> None:
+        config = yaml.safe_load(self.template.read_text(encoding="utf-8"))
+        config["downstream"]["extract"]["threads"] = 0
+        self.template.write_text(
+            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ConfigureError, "downstream.extract.threads"):
+            configure(self.args(self.write_samples(target_gff=True), "provided"))
+
+    def test_invalid_diamond_max_target_seqs_is_rejected(self) -> None:
+        config = yaml.safe_load(self.template.read_text(encoding="utf-8"))
+        config["tag"]["diamond_max_target_seqs"] = 0
+        self.template.write_text(
+            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ConfigureError, "tag.diamond_max_target_seqs"):
+            configure(self.args(self.write_samples(target_gff=True), "provided"))
+
+    def test_missing_diamond_max_target_seqs_is_rejected(self) -> None:
+        config = yaml.safe_load(self.template.read_text(encoding="utf-8"))
+        config["tag"].pop("diamond_max_target_seqs")
+        self.template.write_text(
+            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ConfigureError, "tag.diamond_max_target_seqs"):
             configure(self.args(self.write_samples(target_gff=True), "provided"))
 
 

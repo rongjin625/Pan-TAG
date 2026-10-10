@@ -167,19 +167,6 @@ def command_validate_inputs(args: argparse.Namespace) -> int:
     )
 
     liftoff_samples = samples if annotation_mode == "liftoff" else []
-    if annotation_mode == "liftoff":
-        liftoff = config.get("liftoff")
-        if not isinstance(liftoff, dict):
-            problems.append(
-                "config.yaml requires a 'liftoff' section because some samples have no GFF"
-            )
-        else:
-            for key in ("feature_types",):
-                value = str(liftoff.get(key, "")).strip()
-                if not value:
-                    problems.append(f"Missing config value: liftoff.{key}")
-                elif not Path(value).is_file():
-                    problems.append(f"Liftoff input does not exist: {value}")
 
     for label, filename in files_to_check:
         if filename and not Path(filename).is_file():
@@ -313,12 +300,12 @@ def command_tag_inputs(args: argparse.Namespace) -> int:
     ]
     translated_genes.sort(key=lambda item: (item["chrom"], item["start"], -item["end"]))
     retained_genes: list[dict[str, Any]] = []
-    nested_skipped = 0
+    nested_genes_skipped = 0
     last_by_chrom: dict[str, dict[str, Any]] = {}
     for gene in translated_genes:
         previous = last_by_chrom.get(gene["chrom"])
         if previous is not None and gene["end"] <= previous["end"]:
-            nested_skipped += 1
+            nested_genes_skipped += 1
             continue
         retained_genes.append(gene)
         last_by_chrom[gene["chrom"]] = gene
@@ -351,7 +338,7 @@ def command_tag_inputs(args: argparse.Namespace) -> int:
             writer.writerow(["metric", "value"])
             writer.writerow(["sample_id", args.sample_id])
             writer.writerow(["retained_mcscanx_genes", retained])
-            writer.writerow(["nested_genes_skipped", nested_skipped])
+            writer.writerow(["nested_genes_skipped", nested_genes_skipped])
             writer.writerow(["translated_protein_genes", len(best_proteins)])
             writer.writerow(["coding_filter_mode", schema.coding_filter_mode])
             writer.writerow(["biotype_filter_applied", str(apply_biotype_filter).lower()])
