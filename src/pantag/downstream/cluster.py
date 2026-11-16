@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import math
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -66,6 +65,26 @@ def read_metadata(path: str, global_tag_id: str) -> dict[str, dict[str, str]]:
         }
 
 
+def collapse_exact_sequences(
+    records: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], np.ndarray, np.ndarray]:
+    """Keep one record per exact sequence and map every record to its representative."""
+    representatives: list[tuple[str, str]] = []
+    weights: list[int] = []
+    index_by_sequence: dict[str, int] = {}
+    representative_index: list[int] = []
+    for record in records:
+        index = index_by_sequence.get(record[1])
+        if index is None:
+            index = len(representatives)
+            index_by_sequence[record[1]] = index
+            representatives.append(record)
+            weights.append(0)
+        weights[index] += 1
+        representative_index.append(index)
+    return representatives, np.asarray(representative_index), np.asarray(weights)
+
+
 def seq_kmer_codes(sequence: str, k: int) -> set[int]:
     mask = (1 << (2 * k)) - 1
     shift = 2 * (k - 1)
@@ -87,6 +106,7 @@ def seq_kmer_codes(sequence: str, k: int) -> set[int]:
 
 def build_kmer_matrix(
     records: list[tuple[str, str]], k: int, ubiquitous_threshold: float, threads: int,
+    weights: np.ndarray | None = None,
 ) -> tuple[csr_matrix, int, int]:
     codes: list[np.ndarray] = []
     rows: list[np.ndarray] = []
@@ -113,8 +133,11 @@ def build_kmer_matrix(
         (np.ones(all_rows.size, dtype=np.float32), (all_rows, columns.astype(np.int64))),
         shape=(len(records), unique.size),
     )
-    counts = np.asarray((matrix > 0).sum(axis=0)).ravel()
-    keep = counts <= ubiquitous_threshold * len(records)
+    occurrence_weights = (
+        np.ones(len(records), dtype=np.int64) if weights is None else weights
+    )
+    counts = np.asarray(matrix.T @ occurrence_weights).ravel()
+    keep = counts <= ubiquitous_threshold * occurrence_weights.sum()
     return matrix[:, keep], int(unique.size), int(keep.sum())
 
 
@@ -262,6 +285,7 @@ def write_pcoa(
     coordinates_path: str,
     distance: np.ndarray,
     records: list[tuple[str, str]],
+    representative_index: np.ndarray,
     metadata: dict[str, dict[str, str]],
     labels: np.ndarray,
     genes: list[str],
@@ -271,9 +295,11 @@ def write_pcoa(
     coordinates, explained = pcoa_top2(distance)
     if coordinates is None:
         return
-    group_ids, group_colors = sequence_group_metadata(tag, records, labels)
+    expanded_labels = labels[representative_index]
+    expanded_coordinates = coordinates[representative_index]
+    group_ids, group_colors = sequence_group_metadata(tag, records, expanded_labels)
     coordinate_rows = []
-    for (record_id, _), group_id, point in zip(records, group_ids, coordinates):
+    for (record_id, _), group_id, point in zip(records, group_ids, expanded_coordinates):
         meta = metadata[record_id]
         coordinate_rows.append({
             "global_tag_id": tag,
@@ -293,9 +319,9 @@ def write_pcoa(
     if not path:
         return
     rng = np.random.default_rng(args.seed)
-    plotted = coordinates.copy()
+    plotted = expanded_coordinates.copy()
     if args.pcoa_jitter_frac > 0:
-        scale = max(float(np.ptp(coordinates[:, 0])), float(np.ptp(coordinates[:, 1])), 1e-9)
+        scale = max(float(np.ptp(expanded_coordinates[:, 0])), float(np.ptp(expanded_coordinates[:, 1])), 1e-9)
         plotted += rng.normal(0.0, scale * args.pcoa_jitter_frac, plotted.shape)
     figure, axes = plt.subplots(1, 2, figsize=(16, 7), sharex=True, sharey=True)
     gene_names = sorted(set(genes))
@@ -383,11 +409,12 @@ def run_one(args: argparse.Namespace) -> None:
         raise ClusterError("FASTA contains record IDs absent from sequence_records.tsv")
     genes = [metadata[header]["gene_name"] for header, _ in records]
     samples = [metadata[header]["sample_id"] for header, _ in records]
+    representatives, representative_index, weights = collapse_exact_sequences(records)
     summary: dict[str, object] = {
         "global_tag_id": args.global_tag_id, "status": "ok", "k": args.k,
         "ubiquitous_threshold": args.ubiquitous_threshold,
         "n_sequences": len(records),
-        "n_unique_sequences": len({hashlib.md5(seq.encode()).hexdigest() for _, seq in records}),
+        "n_unique_sequences": len(representatives),
         "n_genes": len(set(genes)), "n_samples": len(set(samples)),
         "n_kmers_total": 0, "n_kmers_kept": 0, "best_n_clusters": "",
         "best_silhouette": "", "ARI_vs_gene": "",
@@ -395,9 +422,11 @@ def run_one(args: argparse.Namespace) -> None:
     write_tsv(args.pcoa_coordinates, PCOA_FIELDS, [])
     if len(records) < args.min_sequences:
         summary["status"] = "too_few_sequences"
+    elif len(representatives) < args.min_sequences:
+        summary["status"] = "too_few_unique_sequences"
     else:
         matrix, total_kmers, kept_kmers = build_kmer_matrix(
-            records, args.k, args.ubiquitous_threshold, args.threads
+            representatives, args.k, args.ubiquitous_threshold, args.threads, weights
         )
         summary["n_kmers_total"], summary["n_kmers_kept"] = total_kmers, kept_kmers
         if kept_kmers == 0 or np.any(np.asarray(matrix.sum(axis=1)).ravel() == 0):
@@ -407,7 +436,7 @@ def run_one(args: argparse.Namespace) -> None:
             tree = linkage(squareform(distance, checks=False), method="average")
             automatic_max = len(set(genes)) + 3
             maximum = args.max_clusters if args.max_clusters > 0 else automatic_max
-            maximum = min(maximum, len(records) - 1)
+            maximum = min(maximum, len(representatives) - 1)
             scores: dict[int, float] = {1: 0.0}
             for count in range(2, maximum + 1):
                 candidate = fcluster(tree, t=count, criterion="maxclust")
@@ -415,13 +444,13 @@ def run_one(args: argparse.Namespace) -> None:
                 if math.isfinite(score):
                     scores[count] = score
             best = choose_cluster_count(scores, args.silhouette_tolerance)
-            labels = np.ones(len(records), dtype=int) if best == 1 else fcluster(tree, t=best, criterion="maxclust")
+            labels = np.ones(len(representatives), dtype=int) if best == 1 else fcluster(tree, t=best, criterion="maxclust")
             summary["best_n_clusters"] = len(set(int(label) for label in labels))
             summary["best_silhouette"] = scores[best]
-            summary["ARI_vs_gene"] = adjusted_rand_score(genes, labels)
+            summary["ARI_vs_gene"] = adjusted_rand_score(genes, labels[representative_index])
             write_pcoa(
-                args.pcoa, args.pcoa_coordinates, distance, records, metadata,
-                labels, genes, args.global_tag_id, args,
+                args.pcoa, args.pcoa_coordinates, distance, records,
+                representative_index, metadata, labels, genes, args.global_tag_id, args,
             )
     for field in (
         "ubiquitous_threshold", "best_silhouette", "ARI_vs_gene",

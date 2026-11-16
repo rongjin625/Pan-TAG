@@ -84,7 +84,7 @@ class PublicSchemaTest(unittest.TestCase):
                 {"H_PSEUDO", "M_PSEUDO"},
             )
             self.assertEqual(set(coordinates), {"H_PSEUDO", "M_PSEUDO", "CODING"})
-            self.assertEqual(chrom_genes["chr1"], ["CODING"])
+            self.assertEqual(chrom_genes["chr1"], ["H_PSEUDO", "M_PSEUDO", "CODING"])
             self.assertNotIn("TXP", coordinates)
 
             proteins = root / "raw.faa"
@@ -513,6 +513,49 @@ class PublicSchemaTest(unittest.TestCase):
                 2,
             )
 
+    def test_flanks_include_pseudogenes_and_follow_recalled_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.yaml"
+            write_annotation_config(config)
+            gff = root / "annotation.gff3"
+            records = [
+                ("L", "gene", "protein_coding"),
+                ("PL", "gene", "processed_pseudogene"),
+                ("A", "gene", "protein_coding"),
+                ("B", "gene", "protein_coding"),
+                ("PR", "pseudogene", "processed_pseudogene"),
+                ("R", "gene", "protein_coding"),
+            ]
+            gff.write_text("".join(
+                f"chr1\ttest\t{feature}\t{i * 20 + 1}\t{i * 20 + 10}"
+                f"\t.\t+\t.\tID={identifier};Name={identifier};biotype={biotype}\n"
+                for i, (identifier, feature, biotype) in enumerate(records)
+            ), encoding="utf-8")
+            coordinates, ordered, positions, names, pseudos = (
+                retrieve_pseudogenes.load_gene_records(
+                    gff, retrieve_pseudogenes.load_schema(config)
+                )
+            )
+            self.assertEqual(ordered["chr1"], ["L", "PL", "A", "B", "PR", "R"])
+            for recalled, upstream, downstream in (
+                ("None", "PL", "PR"),
+                ("PL", "L", "PR"),
+                ("PR", "PL", "R"),
+                ("PL,PR", "L", "R"),
+            ):
+                with self.subTest(recalled=recalled):
+                    row = {"Chrom": "chr1", "Members_IDs": "A,B", "Pseudos_IDs": recalled}
+                    retrieve_pseudogenes.add_flanks([row], ordered, positions, names, 1)
+                    self.assertEqual(row["Upstream_Genes"], upstream)
+                    self.assertEqual(row["Downstream_Genes"], downstream)
+                    retrieve_pseudogenes.finalize_tag_metrics(
+                        [row], coordinates, ordered, {p["id"] for p in pseudos}
+                    )
+                    self.assertEqual(
+                        row["Gene_Density_per_kb"], f"{2 / int(row['Length']) * 1000:.2f}"
+                    )
+
     def test_final_metrics_include_pseudogenes_and_exclude_them_from_density(self) -> None:
         coordinates = {
             "left_pseudo": ("chr1", 0, 10),
@@ -579,7 +622,7 @@ class PublicSchemaTest(unittest.TestCase):
 
             columns, row = read_one(outputs["tags"])
             self.assertEqual(row["candidate_global_tag_id"], "Candidate_cluster_0001")
-            self.assertEqual(row["pan_cluster_size"], "3")
+            self.assertNotIn("pan_cluster_size", columns)
             self.assertEqual(set(row["gene_names"].split(",")), {"A", "B", "P"})
             self.assertEqual(
                 set(row["gene_ids"].split(",")),

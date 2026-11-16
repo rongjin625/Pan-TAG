@@ -372,19 +372,18 @@ def summarize(cells: list[str]) -> dict[str, object]:
     }
 
 
-def span_candidates_to_remove(
-    span_rows: list[dict[str, str]], total_sample_count: int
-) -> set[str]:
-    samples_by_candidate: dict[str, set[str]] = {}
-    for row in span_rows:
-        samples_by_candidate.setdefault(row["candidate_global_tag_id"], set()).add(
-            row["sample_id"]
-        )
-    return {
-        candidate_id
-        for candidate_id, sample_ids in samples_by_candidate.items()
-        if len(sample_ids) / total_sample_count > 0.9
-    }
+def candidate_removal_reason(cells: list[str]) -> str | None:
+    """Require one reliable TAG and at most 90% span samples.
+
+    NA, gap and single-copy counts do not contribute to the span fraction.
+    If both filters fail, report the absence of reliable TAG evidence first.
+    """
+    if not any(cell.isdigit() and int(cell) >= 2 for cell in cells):
+        return "removed_no_valid_tag"
+    span = sum(cell.endswith("#") for cell in cells)
+    if span * 10 > len(cells) * 9:
+        return "removed_span"
+    return None
 
 
 def combine_manifests(path, assets, manifest_paths, id_map) -> None:
@@ -444,13 +443,20 @@ def run(args: argparse.Namespace) -> None:
             span_rows.extend(csv.DictReader(handle, delimiter="\t"))
     rank = {candidate_id: index for index, candidate_id in enumerate(order)}
     span_rows.sort(key=lambda row: (rank[row["candidate_global_tag_id"]], row["sample_id"]))
-    removed = span_candidates_to_remove(span_rows, len(assets))
+    sample_ids = [asset.sample_id for asset in assets]
+    counts_by_sample = {sample: read_counts(count_path) for sample, count_path in count_paths.items()}
+    removed = {}
+    for candidate_id in order:
+        cells = [counts_by_sample[sample].get(candidate_id, "NA") for sample in sample_ids]
+        reason = candidate_removal_reason(cells)
+        if reason:
+            removed[candidate_id] = reason
     id_map, map_rows = {}, []
     for candidate_id in order:
         if candidate_id in removed:
             map_rows.append({
                 "candidate_global_tag_id": candidate_id, "global_tag_id": "",
-                "status": "removed_span",
+                "status": removed[candidate_id],
             })
         else:
             final_id = f"Pan_cluster_{len(id_map) + 1:04d}"
@@ -460,8 +466,6 @@ def run(args: argparse.Namespace) -> None:
                 "global_tag_id": final_id, "status": "retained",
             })
 
-    sample_ids = [asset.sample_id for asset in assets]
-    counts_by_sample = {sample: read_counts(count_path) for sample, count_path in count_paths.items()}
     final_rows, matrix_rows = [], []
     for candidate_id in order:
         final_id = id_map.get(candidate_id)
@@ -494,7 +498,10 @@ def run(args: argparse.Namespace) -> None:
     combine_manifests(args.output_manifest, assets, manifest_paths, id_map)
     print(
         f"[refine] COMPLETE candidates={len(order)} retained={len(final_rows)} "
-        f"removed_span={len(removed)}", flush=True,
+        f"removed={len(removed)} "
+        f"removed_no_valid_tag={sum(reason == 'removed_no_valid_tag' for reason in removed.values())} "
+        f"removed_span={sum(reason == 'removed_span' for reason in removed.values())}",
+        flush=True,
     )
 
 

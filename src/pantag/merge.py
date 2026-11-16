@@ -428,7 +428,6 @@ def command_run(args: argparse.Namespace) -> int:
         tag_rows.append(
             {
                 "candidate_global_tag_id": global_id,
-                "pan_cluster_size": len(global_tag.names),
                 "reference_seqid": global_tag.chrom,
                 "source_sample_id": global_tag.source,
                 "occupancy": len(sample_map),
@@ -443,7 +442,6 @@ def command_run(args: argparse.Namespace) -> int:
         args.output_tags,
         [
             "candidate_global_tag_id",
-            "pan_cluster_size",
             "reference_seqid",
             "source_sample_id",
             "occupancy",

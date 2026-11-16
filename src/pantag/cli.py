@@ -479,7 +479,7 @@ def run_downstream(args: argparse.Namespace, target: str) -> int:
         "--config",
         f"_pantag_downstream_targets={runtime_targets}",
     ]
-    if target == "downstream_cluster":
+    if target == "downstream_structural_haplotype_done":
         command[command.index("--config"):command.index("--config")] = [
             "--allowed-rules",
             "downstream_extract",
@@ -490,7 +490,7 @@ def run_downstream(args: argparse.Namespace, target: str) -> int:
             "downstream_structure_tag",
             "downstream_structure_collapsed_tag",
             "downstream_cluster_summary",
-            "downstream_cluster",
+            "downstream_structural_haplotype_done",
         ]
     if getattr(args, "dry_run", False):
         command.append("--dry-run")
@@ -504,7 +504,7 @@ def run_extract(args: argparse.Namespace) -> int:
 
 
 def run_cluster(args: argparse.Namespace) -> int:
-    return run_downstream(args, "downstream_cluster")
+    return run_downstream(args, "downstream_structural_haplotype_done")
 
 
 def build_root_parser() -> argparse.ArgumentParser:

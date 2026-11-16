@@ -106,6 +106,25 @@ def read_groups(path: str, tag: str, prefixes: tuple[str, ...]):
     return mapping
 
 
+def read_locations(path: str, tag: str, prefixes: tuple[str, ...]):
+    required = {"global_tag_id", "sample_id", "gene_id", "seqid", "extraction_eligible"}
+    locations = {}
+    with Path(path).open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise StructureError("Sequence manifest missing: " + ", ".join(sorted(missing)))
+        for row in reader:
+            if row["global_tag_id"] != tag or row["extraction_eligible"] != "true":
+                continue
+            identifier = normalize_gene_identifier(
+                row["gene_id"], row["sample_id"], prefixes
+            )
+            if identifier:
+                locations[(row["sample_id"], identifier)] = row["seqid"]
+    return locations
+
+
 def read_gff(path: Path, sample: str, schema):
     genes = {}
     allowed = set(schema.gene_feature_types) | set(schema.pseudogene_feature_types)
@@ -195,20 +214,16 @@ def build_index(args: argparse.Namespace) -> None:
     print(f"[structure-index] DONE samples={len(assets)} output={output}", flush=True)
 
 
-def indexed_region(connection, sample: str, target_ids: set[str], flank: int):
+def indexed_region(connection, sample: str, seqid: str, target_ids: set[str], flank: int):
     placeholders = ",".join("?" for _ in target_ids)
     rows = connection.execute(
         "SELECT seqid, gene_order, gene_id, gene_name, start, end, strand "
-        f"FROM genes WHERE sample_id=? AND gene_id IN ({placeholders}) "
-        "ORDER BY seqid, gene_order",
-        (sample, *sorted(target_ids)),
+        f"FROM genes WHERE sample_id=? AND seqid=? AND gene_id IN ({placeholders}) "
+        "ORDER BY gene_order",
+        (sample, seqid, *sorted(target_ids)),
     ).fetchall()
     if not rows:
         raise StructureError(f"No indexed target genes for {sample}")
-    seqids = {row[0] for row in rows}
-    if len(seqids) != 1:
-        raise StructureError(f"Target genes occur on multiple seqids for {sample}")
-    seqid = rows[0][0]
     orders = [row[1] for row in rows]
     first, last = min(orders), max(orders)
 
@@ -332,6 +347,7 @@ def run(args: argparse.Namespace) -> None:
     )
     selected = read_matrix(args.matrix, args.global_tag_id, [row[0] for row in assets])
     groups = read_groups(args.coordinates, args.global_tag_id, schema.strip_id_prefixes)
+    locations = read_locations(args.manifest, args.global_tag_id, schema.strip_id_prefixes)
     targets_by_sample = {}
     for sample, identifier in groups:
         targets_by_sample.setdefault(sample, set()).add(identifier)
@@ -345,7 +361,14 @@ def run(args: argparse.Namespace) -> None:
             target_ids = targets_by_sample.get(sample)
             if not target_ids:
                 raise StructureError(f"No sequence-group records for {sample}")
-            left, targets, right = indexed_region(connection, sample, target_ids, args.flank)
+            seqids = {locations.get((sample, gene_id)) for gene_id in target_ids}
+            if None in seqids:
+                raise StructureError(f"No manifest location for target genes in {sample}")
+            if len(seqids) != 1:
+                raise StructureError(f"Target genes occur on multiple seqids for {sample}")
+            left, targets, right = indexed_region(
+                connection, sample, seqids.pop(), target_ids, args.flank
+            )
             group_map = {
                 gene.gene_id: groups[(sample, gene.gene_id)][0]
                 for gene in targets
@@ -445,6 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--global-tag-id", required=True)
     parser.add_argument("--matrix", required=True)
     parser.add_argument("--coordinates", required=True)
+    parser.add_argument("--manifest", required=True)
     parser.add_argument("--gene-index", required=True)
     parser.add_argument("--samples", required=True)
     parser.add_argument("--config", required=True)

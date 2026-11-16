@@ -139,9 +139,10 @@ def load_gene_records(
                         "strand": strand,
                     }
                 )
-            elif feature_type in gene_features:
-                # Only ordinary gene-level records define flank order and density.
-                ordered_data.append((chrom, start, identifier))
+            # Use all accepted gene-level records for flanks, as refine does.
+            # Recalled pseudogenes must also participate in TAG boundary lookup.
+            # finalize_tag_metrics separately excludes pseudogenes from density.
+            ordered_data.append((chrom, start, identifier))
 
     ordered_data.sort(key=lambda item: (item[0], item[1]))
     chrom_genes: dict[str, list[str]] = defaultdict(list)

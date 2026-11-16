@@ -5,29 +5,30 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
-
-import pysam
 
 
 def build_index(fasta: str | Path, index: str | Path) -> None:
     source = Path(fasta).resolve()
-    output = Path(index)
+    output = Path(index).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    link = output.with_name(output.name + ".source" + "".join(source.suffixes))
-    generated = Path(f"{link}.fai")
-    temporary = output.with_suffix(output.suffix + ".tmp")
-    for path in (link, generated, temporary):
-        path.unlink(missing_ok=True)
-    try:
+    # Keep pysam's output-capture files in private workspace storage. A fresh
+    # interpreter also avoids Python's cached tempfile directory and changing
+    # process-global settings when this function is called from other code.
+    with tempfile.TemporaryDirectory(prefix=".faidx-", dir=output.parent) as scratch:
+        link = Path(scratch) / ("source" + "".join(source.suffixes))
         os.symlink(source, link)
-        pysam.faidx(str(link))
-        os.replace(generated, temporary)
-        os.replace(temporary, output)
-    finally:
-        link.unlink(missing_ok=True)
-        generated.unlink(missing_ok=True)
-        temporary.unlink(missing_ok=True)
+        environment = os.environ.copy()
+        environment.update(TMPDIR=scratch, TEMP=scratch, TMP=scratch)
+        subprocess.run(
+            [sys.executable, "-c",
+             "import sys, pysam; pysam.faidx(sys.argv[1])", str(link)],
+            env=environment, check=True,
+        )
+        os.replace(Path(f"{link}.fai"), output)
 
 
 def main() -> int:

@@ -322,7 +322,7 @@ results/
 ```
 
 - `<sample_id>_TAGs.tsv`: cleaned per-sample TAGs, including members, coordinates, density, and flanking genes; pseudogene columns are included when pseudogenes are recovered.
-- `pangenome_TAGs.tsv`: final Pan-cluster table with member names/IDs, source sample, seqid, sample occupancy, and merged left/right flanking genes. `pan_cluster_size` counts distinct member names, not total gene copies across samples. `gene_names` and `gene_ids` are independently deduplicated and sorted sets, not positionally paired lists.
+- `pangenome_TAGs.tsv`: final Pan-cluster table with member names/IDs, source sample, seqid, sample occupancy, and merged left/right flanking genes. `gene_names` and `gene_ids` are independently deduplicated and sorted sets, not positionally paired lists.
 - `refined_TAG_count_matrix.tsv`: Pan-cluster × sample count matrix, with detection counts, gap-free sample counts, mean, standard deviation, and coefficient of variation.
 - `Pan_cluster_XXXX_sequences.fa`: sequences from gap-free, non-span records in the Pan-cluster; headers include sample, gene name, and gene ID.
 - `Pan_cluster_XXXX_pcoa.pdf`: two panels sharing the same coordinates, colored by original gene name on the left and sequence group (`Pan_cluster_XXXX-SGXX`) on the right.
@@ -342,7 +342,7 @@ Sample cells use the notation below. In `N*` and `N#`, `N` denotes the count (e.
 | `N#` | Multiple blocks supported by flanking genes (span) |
 | `NA` | No target genes found, or no block passed flanking-gene QC |
 
-Refinement removes a candidate cluster only when its fraction of span samples is strictly greater than 0.9.
+Refinement retains a candidate cluster only if at least one sample has an unmarked integer count of 2 or more, and the fraction of span (`#`) samples is at most 0.90 across all samples, including the reference. `NA`, gap (`*`), and unmarked single-copy counts do not contribute to the span fraction, but do not provide evidence of a valid TAG either.
 
 ### Intermediate files and logs
 

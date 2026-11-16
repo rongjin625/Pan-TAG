@@ -750,6 +750,7 @@ rule downstream_structure_tag:
     input:
         summary=f"{DOWNSTREAM_WORK}/clusters/{{global_tag}}/summary.tsv",
         coordinates=f"{DOWNSTREAM}/{{global_tag}}/clusters/{{global_tag}}_pcoa_coordinates.tsv",
+        manifest=f"{DOWNSTREAM_WORK}/TAG_sequence_manifest.tsv",
         gene_index=STRUCTURE_GENE_INDEX,
         matrix=f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
         samples=SAMPLES_FILE,
@@ -767,6 +768,7 @@ rule downstream_structure_tag:
           --global-tag-id {wildcards.global_tag} \
           --matrix {input.matrix} \
           --coordinates {input.coordinates} \
+          --manifest {input.manifest} \
           --gene-index {input.gene_index} \
           --samples {input.samples} \
           --config {input.config} \
@@ -781,6 +783,7 @@ rule downstream_structure_collapsed_tag:
     input:
         summary=f"{DOWNSTREAM_WORK}/clusters/{{global_tag}}/summary.tsv",
         coordinates=f"{DOWNSTREAM}/{{global_tag}}/clusters/{{global_tag}}_pcoa_coordinates.tsv",
+        manifest=f"{DOWNSTREAM_WORK}/TAG_sequence_manifest.tsv",
         gene_index=STRUCTURE_GENE_INDEX,
         matrix=f"{RESULTS}/global/refined_TAG_count_matrix.tsv",
         samples=SAMPLES_FILE,
@@ -799,6 +802,7 @@ rule downstream_structure_collapsed_tag:
           --global-tag-id {wildcards.global_tag} \
           --matrix {input.matrix} \
           --coordinates {input.coordinates} \
+          --manifest {input.manifest} \
           --gene-index {input.gene_index} \
           --samples {input.samples} \
           --config {input.config} \
@@ -829,7 +833,7 @@ rule downstream_cluster_summary:
         """
 
 
-rule downstream_cluster:
+rule downstream_structural_haplotype_done:
     input:
         summary=f"{DOWNSTREAM}/global_cluster_summary.tsv",
         structures=drawable_structure_outputs,

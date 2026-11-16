@@ -113,13 +113,22 @@ class CoreRefineTest(unittest.TestCase):
                 liftoff_dir=str(root / "liftoff"), output=str(gene_index), threads=2,
             ))
             output = root / "TAG_structure.pdf"
-            structure.run(argparse.Namespace(
-                global_tag_id="Pan_cluster_0001", matrix=str(matrix),
-                coordinates=str(coordinates), gene_index=str(gene_index),
-                samples=str(samples), config=str(config),
-                run_dir=str(root), liftoff_dir=str(root / "liftoff"),
-                output=str(output), flank=1,
-            ))
+            manifest = root / "TAG_sequence_manifest.tsv"
+            manifest.write_text(
+                "global_tag_id\tsample_id\tgene_id\tseqid\textraction_eligible\n"
+                "Pan_cluster_0001\tS1\tTARGET1\tchr1\ttrue\n"
+                "Pan_cluster_0001\tS1\tTARGET2\tchr1\ttrue\n",
+                encoding="utf-8",
+            )
+            # Use the real CLI parser so optional defaults stay in sync.
+            structure.run(structure.build_parser().parse_args([
+                "--global-tag-id", "Pan_cluster_0001", "--matrix", str(matrix),
+                "--coordinates", str(coordinates), "--gene-index", str(gene_index),
+                "--manifest", str(manifest), "--samples", str(samples),
+                "--config", str(config), "--run-dir", str(root),
+                "--liftoff-dir", str(root / "liftoff"),
+                "--output", str(output), "--flank", "1",
+            ]))
             self.assertGreater(output.stat().st_size, 0)
 
     def test_extract_spool_accepts_sequences_above_csv_default_limit(self) -> None:
@@ -167,15 +176,24 @@ class CoreRefineTest(unittest.TestCase):
         )
         self.assertTrue(action.required)
 
-    def test_span_removal_requires_fraction_strictly_above_point_nine(self) -> None:
-        rows = [
-            {"candidate_global_tag_id": "at_0_9", "sample_id": f"S{i}"}
-            for i in range(9)
-        ] + [
-            {"candidate_global_tag_id": "above_0_9", "sample_id": f"S{i}"}
-            for i in range(10)
+    def test_candidate_removal_requires_valid_tag_and_limits_span_fraction(self) -> None:
+        cases = [
+            (["2"] + ["1"] * 99, None),
+            (["2"] + ["1"] * 9 + ["NA", "2*", "2#"] * 30, None),
+            (["2"] + ["1"] * 8 + ["NA", "2*", "2#"] * 30 + ["NA"], None),
+            (["2"] + ["NA"] * 99, None),
+            (["2"] + ["3*"] * 99, None),
+            (["2"] + ["3#"] * 99, "removed_span"),
+            (["2"] + ["1"] * 9 + ["3#"] * 90, None),
+            (["2"] + ["1"] * 8 + ["3#"] * 91, "removed_span"),
+            (["1"] * 100, "removed_no_valid_tag"),
+            (["NA"] * 100, "removed_no_valid_tag"),
+            (["1", "2*", "2#"], "removed_no_valid_tag"),
+            (["2"], None),
         ]
-        self.assertEqual(refine.span_candidates_to_remove(rows, 10), {"above_0_9"})
+        for cells, expected in cases:
+            with self.subTest(cells=cells):
+                self.assertEqual(refine.candidate_removal_reason(cells), expected)
 
     def test_flank_score_uses_recovered_sample_flank_as_denominator(self) -> None:
         genes = [
@@ -419,13 +437,13 @@ class CoreRefineTest(unittest.TestCase):
             )
             candidates = root / "candidates.tsv"
             candidates.write_text(
-                "candidate_global_tag_id\tpan_cluster_size\treference_seqid\tsource_sample_id\toccupancy\tgene_names\tgene_ids\tleft_flank_genes\tright_flank_genes\n"
-                "Candidate_cluster_0001\t2\tchr1\tref\t2\tA,B\ta,b\t\tC\n"
-                "Candidate_cluster_0002\t1\tchr1\tref\t2\tC\tc\tB\t\n"
-                "Candidate_cluster_0003\t1\tchr1\tref\t1\tD\td\tC\t\n"
-                "Candidate_cluster_0004\t1\tchr1\tref\t2\tE\te\t\tF\n"
-                "Candidate_cluster_0005\t1\tchr1\tref\t2\tG\tg\tX\t\n"
-                "Candidate_cluster_0006\t1\tchr1\tref\t2\tF\tf\tZ\t\n",
+                "candidate_global_tag_id\treference_seqid\tsource_sample_id\toccupancy\tgene_names\tgene_ids\tleft_flank_genes\tright_flank_genes\n"
+                "Candidate_cluster_0001\tchr1\tref\t2\tA,B\ta,b\t\tC\n"
+                "Candidate_cluster_0002\tchr1\tref\t2\tC\tc\tB\t\n"
+                "Candidate_cluster_0003\tchr1\tref\t1\tD\td\tC\t\n"
+                "Candidate_cluster_0004\tchr1\tref\t2\tE\te\t\tF\n"
+                "Candidate_cluster_0005\tchr1\tref\t2\tG\tg\tX\t\n"
+                "Candidate_cluster_0006\tchr1\tref\t2\tF\tf\tZ\t\n",
                 encoding="utf-8",
             )
             config = root / "config.yaml"
@@ -463,10 +481,7 @@ class CoreRefineTest(unittest.TestCase):
             manifest = read_tsv(outputs["manifest"])
             id_map = read_tsv(outputs["map"])
             spans = read_tsv(outputs["span"])
-            final_ids = [
-                "Pan_cluster_0001", "Pan_cluster_0002", "Pan_cluster_0003",
-                "Pan_cluster_0004", "Pan_cluster_0005",
-            ]
+            final_ids = ["Pan_cluster_0001"]
             self.assertEqual([row["global_tag_id"] for row in final_tags], final_ids)
             self.assertEqual([row["global_tag_id"] for row in matrix], final_ids)
             self.assertEqual(list(matrix[0])[-2:], ["ref", "sample1"])
@@ -474,16 +489,12 @@ class CoreRefineTest(unittest.TestCase):
                 sorted({row["global_tag_id"] for row in manifest}), final_ids[:4]
             )
             self.assertEqual((matrix[0]["ref"], matrix[0]["sample1"]), ("2", "2"))
-            self.assertEqual((matrix[1]["ref"], matrix[1]["sample1"]), ("1", "1*"))
-            self.assertEqual((matrix[2]["ref"], matrix[2]["sample1"]), ("1", "NA"))
-            self.assertEqual((matrix[3]["ref"], matrix[3]["sample1"]), ("1", "2#"))
-            self.assertEqual((matrix[4]["ref"], matrix[4]["sample1"]), ("NA", "NA"))
-            self.assertEqual(matrix[1]["detected_sample_count"], "2")
-            self.assertEqual(matrix[1]["gap_free_sample_count"], "1")
-            self.assertEqual(matrix[1]["gap_free_sample_fraction"], "0.50")
-            self.assertEqual(matrix[1]["gene_count_mean"], "1.00")
-            self.assertEqual(matrix[1]["gene_count_std"], "0.00")
-            self.assertEqual(matrix[1]["gene_count_cv"], "0.00")
+            self.assertEqual(matrix[0]["detected_sample_count"], "2")
+            self.assertEqual(matrix[0]["gap_free_sample_count"], "2")
+            self.assertEqual(matrix[0]["gap_free_sample_fraction"], "1.00")
+            self.assertEqual(matrix[0]["gene_count_mean"], "2.00")
+            self.assertEqual(matrix[0]["gene_count_std"], "0.00")
+            self.assertEqual(matrix[0]["gene_count_cv"], "0.00")
             sample_columns = ["ref", "sample1"]
             self.assertFalse(any(
                 row[sample] == "0"
@@ -494,11 +505,11 @@ class CoreRefineTest(unittest.TestCase):
                 [(row["candidate_global_tag_id"], row["global_tag_id"], row["status"]) for row in id_map],
                 [
                     ("Candidate_cluster_0001", "Pan_cluster_0001", "retained"),
-                    ("Candidate_cluster_0002", "Pan_cluster_0002", "retained"),
-                    ("Candidate_cluster_0003", "Pan_cluster_0003", "retained"),
-                    ("Candidate_cluster_0004", "Pan_cluster_0004", "retained"),
-                    ("Candidate_cluster_0005", "", "removed_span"),
-                    ("Candidate_cluster_0006", "Pan_cluster_0005", "retained"),
+                    ("Candidate_cluster_0002", "", "removed_no_valid_tag"),
+                    ("Candidate_cluster_0003", "", "removed_no_valid_tag"),
+                    ("Candidate_cluster_0004", "", "removed_no_valid_tag"),
+                    ("Candidate_cluster_0005", "", "removed_no_valid_tag"),
+                    ("Candidate_cluster_0006", "", "removed_no_valid_tag"),
                 ],
             )
             self.assertEqual(len([row for row in spans if row["candidate_global_tag_id"] == "Candidate_cluster_0004"]), 1)
@@ -605,6 +616,18 @@ class CoreRefineTest(unittest.TestCase):
         second = cluster.sequence_group_metadata("Pan_cluster_0433", records, labels)
         self.assertEqual(first, second)
         self.assertEqual(first[0], ["Pan_cluster_0433-SG02", "Pan_cluster_0433-SG01", "Pan_cluster_0433-SG02"])
+
+    def test_exact_sequence_collapse_preserves_record_multiplicity(self) -> None:
+        records = [
+            ("record_a", "AAAA"),
+            ("record_b", "CCCC"),
+            ("record_c", "AAAA"),
+            ("record_d", "AAAA"),
+        ]
+        representatives, representative_index, weights = cluster.collapse_exact_sequences(records)
+        self.assertEqual(representatives, [("record_a", "AAAA"), ("record_b", "CCCC")])
+        self.assertEqual(representative_index.tolist(), [0, 1, 0, 0])
+        self.assertEqual(weights.tolist(), [3, 1])
 
 
 if __name__ == "__main__":
