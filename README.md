@@ -12,6 +12,20 @@ cd Pan-TAG
 pixi install
 ```
 
+Alternatively, download the source archive via the GitHub API:
+
+```bash
+cd /path/to/software
+curl -fL --retry 3 \
+  -H "Accept: application/vnd.github+json" \
+  -o Pan-TAG.tar.gz \
+  https://api.github.com/repos/rongjin625/Pan-TAG/tarball/main
+
+mkdir Pan-TAG
+tar -xzf Pan-TAG.tar.gz --strip-components=1 -C Pan-TAG
+cd Pan-TAG
+```
+
 For Liftoff annotation mode, also install:
 
 ```bash
