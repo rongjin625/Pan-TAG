@@ -9,7 +9,6 @@ Pan-TAG supports Linux x86-64 and requires Git and [Pixi](https://pixi.sh/). Ins
 cd /path/to/software
 git clone https://github.com/rongjin625/Pan-TAG.git
 cd Pan-TAG
-pixi install
 ```
 
 Alternatively, download the source archive via the GitHub API:
@@ -26,15 +25,15 @@ tar -xzf Pan-TAG.tar.gz --strip-components=1 -C Pan-TAG
 cd Pan-TAG
 ```
 
-For Liftoff annotation mode, also install:
+Install dependencies:
 
 ```bash
+pixi install
+
+# Only required for Liftoff annotation mode
 pixi install --environment liftoff
-```
 
-Check the installation:
-
-```bash
+# Check the installation
 pixi run pantag --version
 ```
 
