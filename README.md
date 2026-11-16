@@ -1,3 +1,4 @@
+<img width="5382" height="6954" alt="Pan_TAG_workflow" src="https://github.com/user-attachments/assets/f5fb76f1-6026-486a-8326-87a31cb17cb8" />
 <a id="installation"></a>
 
 ## Getting Started
